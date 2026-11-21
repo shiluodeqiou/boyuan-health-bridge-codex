@@ -1,11 +1,18 @@
 from __future__ import annotations
 
+import asyncio
 import os
+import re
+from datetime import datetime
+from email.utils import parsedate_to_datetime
 from typing import Any
 
 import httpx
 
 SKILL_URL = "https://lianlian.gzyunke.cn/api/v1/ai/skill"
+API_BASE_URL = "https://lianlian.gzyunke.cn"
+SKILL_VERSION = "1.29.0"
+AGENT_NAME = "ChatGPT"
 
 
 def _token() -> str:
@@ -65,6 +72,172 @@ async def get_skill_manifest() -> dict[str, Any]:
             "这是练练健身当前返回的技能说明。应先按该说明确认只读训练记录接口和字段，"
             "不要猜测未在文档中出现的端点。"
         ),
+    }
+
+
+
+def _api_headers(token: str, skill_version: str = SKILL_VERSION) -> dict[str, str]:
+    return {
+        "Authorization": f"Bearer {token}",
+        "Accept": "application/json",
+        "X-KeepStrong-Skill-Version": skill_version,
+        "X-KeepStrong-Agent-Name": AGENT_NAME,
+        "User-Agent": "BoyuanHealthBridge/1.0",
+    }
+
+
+def _validate_training_query(start_date: str, end_date: str, page: int, page_size: int) -> None:
+    for name, value in (("start_date", start_date), ("end_date", end_date)):
+        if not re.fullmatch(r"\\d{8}", value or ""):
+            raise ValueError(f"{name} 必须使用 yyyyMMdd 格式")
+        try:
+            datetime.strptime(value, "%Y%m%d")
+        except ValueError as exc:
+            raise ValueError(f"{name} 不是有效日期") from exc
+    if start_date > end_date:
+        raise ValueError("start_date 不能晚于 end_date")
+    if page < 1:
+        raise ValueError("page 必须大于等于 1")
+    if not 1 <= page_size <= 50:
+        raise ValueError("page_size 必须在 1 到 50 之间")
+
+
+def _error_payload(response: httpx.Response) -> dict[str, Any]:
+    try:
+        value = response.json()
+        return value if isinstance(value, dict) else {"detail": value}
+    except ValueError:
+        return {"detail": response.text[:2000]}
+
+
+async def _get_training_records_request(
+    token: str,
+    *,
+    start_date: str,
+    end_date: str,
+    page: int,
+    page_size: int,
+    skill_version: str,
+) -> httpx.Response:
+    headers = _api_headers(token, skill_version)
+    params = {
+        "startDate": start_date,
+        "endDate": end_date,
+        "page": page,
+        "pageSize": page_size,
+    }
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0),
+        follow_redirects=False,
+    ) as client:
+        response = await client.get(
+            f"{API_BASE_URL}/api/v1/ai/training/records",
+            headers=headers,
+            params=params,
+        )
+    return response
+
+
+async def get_training_records_page(
+    *,
+    start_date: str,
+    end_date: str,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict[str, Any]:
+    """Read one raw KeepStrong training-record page; no data is written."""
+    _validate_training_query(start_date, end_date, page, page_size)
+    token = _token()
+    if not token:
+        raise RuntimeError("练练健身尚未配置 LIANLIAN_API_TOKEN")
+
+    version = SKILL_VERSION
+    response = await _get_training_records_request(
+        token,
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+        skill_version=version,
+    )
+
+    if response.status_code == 426:
+        error = _error_payload(response)
+        if error.get("skillUpdateRequired") is True:
+            manifest = await get_skill_manifest()
+            document = manifest.get("skill_document")
+            if isinstance(document, dict) and document.get("version"):
+                version = str(document["version"])
+                response = await _get_training_records_request(
+                    token,
+                    start_date=start_date,
+                    end_date=end_date,
+                    page=page,
+                    page_size=page_size,
+                    skill_version=version,
+                )
+        if response.status_code == 426:
+            raise RuntimeError("练练健身要求更新技能版本；请重新读取最新技能说明后再试")
+
+    if response.status_code == 401:
+        error = _error_payload(response)
+        if error.get("apiKeyExpired") is True:
+            raise RuntimeError(
+                "练练健身 API Key 已过期。请打开 练练健身 > 我的 > 连接 AI，"
+                "重新生成 API Key，点击 Copy AI connection details，并更新 Render 的 "
+                "LIANLIAN_API_TOKEN。"
+            )
+        raise RuntimeError("练练健身 API 鉴权失败（HTTP 401），请检查 Render 环境变量")
+
+    if response.status_code == 429:
+        retry_after = response.headers.get("Retry-After", "")
+        wait_seconds: float | None = None
+        try:
+            wait_seconds = float(retry_after)
+        except (TypeError, ValueError):
+            try:
+                wait_seconds = max(
+                    0.0,
+                    (parsedate_to_datetime(retry_after) - datetime.now(parsedate_to_datetime(retry_after).tzinfo)).total_seconds(),
+                )
+            except (TypeError, ValueError, OverflowError):
+                wait_seconds = None
+        if wait_seconds is not None and 0 < wait_seconds <= 60:
+            await asyncio.sleep(wait_seconds)
+            response = await _get_training_records_request(
+                token,
+                start_date=start_date,
+                end_date=end_date,
+                page=page,
+                page_size=page_size,
+                skill_version=version,
+            )
+        else:
+            raise RuntimeError(
+                f"练练健身 API 请求频率受限（HTTP 429）；Retry-After={retry_after or '未提供'}，"
+                "本次未自动重试。"
+            )
+
+    if response.status_code >= 400:
+        error = _error_payload(response)
+        raise RuntimeError(
+            f"练练健身训练记录接口失败（HTTP {response.status_code}）："
+            f"{str(error)[:1500]}"
+        )
+
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise RuntimeError("练练健身训练记录接口返回的不是有效 JSON") from exc
+    if not isinstance(payload, dict):
+        raise RuntimeError("练练健身训练记录接口返回结构不是 JSON 对象")
+    return {
+        "provider": "keepstrong",
+        "skill_version": version,
+        "page": page,
+        "page_size": page_size,
+        "query": {"startDate": start_date, "endDate": end_date},
+        "response": payload,
     }
 
 
