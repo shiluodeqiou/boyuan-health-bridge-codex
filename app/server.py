@@ -91,7 +91,7 @@ async def get_health_history(
 
 @mcp.tool(
     title="读取体脂秤身体成分",
-    description="读取当前登录小米账号本人最近指定天数的原始体重与体脂秤身体成分记录，包括体脂率、脂肪量、肌肉量、骨骼肌量、骨量、蛋白质、水分、内脏脂肪、基础代谢等设备实际提供的字段。days 为 1 到 3650；不会将缺失字段补成 0。",
+    description="读取当前登录小米账号本人最近指定天数的原始体重与体脂秤身体成分记录，包括体脂率、脂肪量、肌肉量、骨骼肌量、骨量、蛋白质、水分、内脏脂肪、基础代谢、四肢及躯干分段脂肪/肌肉量和设备实际提供的其他原始字段。days 为 1 到 3650；不会将缺失字段补成 0。",
     annotations=READ_ONLY,
 )
 async def get_body_composition_history(
