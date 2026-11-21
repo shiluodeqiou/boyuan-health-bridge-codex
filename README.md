@@ -42,34 +42,51 @@
 
 ## 统一个人健身数据库
 
-项目可将多个来源的数据写入 PostgreSQL，保留原始 JSON 以便以后扩展字段，并按来源 ID 幂等更新。
+项目将当前登录的小米运动健康本人数据与练练健身训练记录写入同一个 PostgreSQL 数据库（Neon）。上游数据源只读；同步只写入用户自己的数据库，不修改小米或练练 App 中的记录。
 
-### 数据模型
+### 统一数据模型
 
-- `fitness_body_measurements`：体重、BMI、体脂率、脂肪量、肌肉量、骨骼肌量及完整体脂秤原始字段。
-- `fitness_health_metrics`：心率、睡眠、步数、热量、血氧、活动强度、站立和血压等日常健康记录。
-- `fitness_workout_sessions`：小米有氧/运动摘要和练练健身力量训练会话。
-- `fitness_workout_samples`：小米运动逐秒采样。
-- `fitness_strength_exercises` / `fitness_strength_sets`：练练健身动作、组数、重量、次数和组间休息。
-- `fitness_sync_runs` / `fitness_sync_state`：同步历史、数据覆盖和最近成功时间。
+- \`fitness_body_measurements\`：逐次体脂秤测量，含体重、BMI、体脂率、脂肪量、肌肉量、骨骼肌、骨量、蛋白质、水分、去脂体重、内脏脂肪、基础代谢、腰臀比、身体评分/年龄及四肢/躯干分段数据。完整原始 JSON 永久保留。
+- \`fitness_health_metrics\`：心率、睡眠、步数、热量、血氧、活动强度、站立和血压等日常指标。
+- \`fitness_workout_sessions\`：统一运动会话；用 \`source\` 区分 \`xiaomi\` 与 \`lianlian\`，并用 \`session_date\`、\`modality\`、时长、热量、心率、训练类型和来源元数据关联。
+- \`fitness_workout_samples\`：小米运动逐次采样。
+- \`fitness_strength_exercises\`：动作名称、动作 ID、重量单位、动作容量、计划休息和原始动作 JSON。
+- \`fitness_strength_sets\`：每组重量数值/单位、kg 标准重量、次数、时长、计划/实际休息、完成状态/时间、PR 和估算 1RM、心率扩展字段及原始组 JSON。
+- \`fitness_sync_runs\` / \`fitness_sync_state\`：每次同步的状态、覆盖范围、计数和最近成功时间。
+
+### 自动迁移与分析视图
+
+服务启动时通过幂等 DDL 将旧表升级，不删除历史记录；迁移会从已有原始 JSON 回填新增的身体成分、训练类型、动作和组字段。
+
+- \`fitness_daily_overview\`：按中国标准时间日期合并体脂秤、日常健康指标、小米有氧运动和练练力量训练。
+- \`fitness_strength_progression\`：按日期和动作统计组数、次数、训练容量、最大重量及 Epley 估算 1RM。
+
+力量训练容量仅累计明确标注为 kg 且有次数的组；体重训练或未知单位不会被臆算为外部负重。Epley 估算 1RM 仅用于趋势参考，不代表实测最大重量。体脂秤原始测量逐条保存，日视图仅展示当日最后一次测量。
 
 ### 部署配置
 
-当前 Render 免费 Web Service 的本地文件系统不适合作为长期数据库，因此统一数据库使用外部 PostgreSQL（例如 Neon）。在 Render → Environment 配置：
+在 Render → Environment 配置：
 
-- `DATABASE_URL`：PostgreSQL 连接串。只放在 Render 环境变量，不要提交到 Git。
-- `LIANLIAN_API_TOKEN`：练练健身 AI skill 的 Bearer Token。只放在 Render 环境变量，不要发到聊天或提交到 Git。
+- \`DATABASE_URL\`：Neon PostgreSQL 连接串，应用运行建议使用带 \`-pooler\` 的连接地址。
+- \`LIANLIAN_API_TOKEN\`：练练健身 AI skill Bearer Token。
 
-保存后 Render 会自动重新部署。首次调用同步工具时会自动创建所需表，不需要手动执行 SQL。
+密钥只放在 Render 环境变量，不提交到 Git。当前 Render 免费 Web Service 的本地文件系统不适合持久化数据库文件，因此统一数据保存在 Neon。
 
-### MCP 数据库工具
+### MCP 工具
 
-- `sync_personal_fitness_data(days=30, include_sport_details=false)`：将小米本人最近 1–30 天的身体成分、日常健康指标和运动记录写入数据库；开启 `include_sport_details` 时额外读取支持格式的逐秒运动采样。
-- `get_fitness_database_summary(days=30)`：查看各来源记录数、最近同步结果和数据覆盖。
-- `get_lianlian_skill_manifest()`：安全读取练练健身当前返回的技能/API说明，不返回 Token。
-- `ingest_lianlian_workouts(records)`：接收已标准化的练练健身训练记录，写入训练会话、动作和组数据。
+- \`sync_unified_fitness_database(days=30, include_sport_details=false)\`：同步小米身体成分、日常健康指标、运动摘要，以及练练官方训练记录。练练接口自动分页，全部页面确认 \`hasMore=false\` 后才写入；按来源 ID 幂等更新。
+- \`sync_personal_fitness_data(days=30, include_sport_details=false)\`：仅同步小米数据。
+- \`get_fitness_database_summary(days=30)\`：查看来源记录数和最近同步任务。
+- \`get_fitness_dashboard(days=90)\`：读取每日统一时间轴、身体成分变化、运动时长/热量、力量训练组数/容量和动作进步趋势。
+- \`get_lianlian_skill_manifest()\`：安全读取练练当前技能说明。
+- \`get_lianlian_training_records_page(start_date, end_date, page, page_size)\`：只读诊断练练原始分页，不写数据库。
+- \`ingest_lianlian_workouts(records)\`：接收已标准化训练数据的底层导入工具。
 
-练练健身自动读取适配器必须先依据 `get_lianlian_skill_manifest` 返回的当前文档确认端点和字段，不猜测未公开的 API。标准导入结构为：训练记录包含 `id`、`started_at`、`exercises`；每个动作包含 `name`、`sets`；每组可包含 `weight_kg`、`reps`、`duration_seconds`、`rest_seconds`。完整原始记录会保留在 `raw_data`。
+练练自动同步使用官方 \`GET /api/v1/ai/training/records\`，按日期分页读取，保留会话、动作和每组原始 JSON。每组缺失重量或次数保持 NULL；无重量单位的自重动作不转换为 kg。重复同步会更新已有会话和子记录，并清理来源已删除的多余动作/组次索引。
+
+### 同步策略
+
+统一同步默认回看最近 30 天，采用重叠窗口幂等 upsert：可捕获迟到写入或最近修改的记录，同时避免重复。每日自动同步由 ChatGPT Automation 调用统一同步 MCP 工具执行；如果自动化尚未创建，需要在连接与部署验证完成后启用。
 
 ## 本地开发
 
