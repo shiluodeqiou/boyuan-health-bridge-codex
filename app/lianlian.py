@@ -229,8 +229,8 @@ async def get_training_records_page(
         payload = response.json()
     except ValueError as exc:
         raise RuntimeError("练练健身训练记录接口返回的不是有效 JSON") from exc
-    if not isinstance(payload, dict):
-        raise RuntimeError("练练健身训练记录接口返回结构不是 JSON 对象")
+    if not isinstance(payload, (dict, list)):
+        raise RuntimeError("练练健身训练记录接口返回的 JSON 类型无效")
     return {
         "provider": "keepstrong",
         "skill_version": version,
