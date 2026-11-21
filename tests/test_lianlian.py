@@ -45,5 +45,5 @@ def test_rejects_lianlian_workout_without_id() -> None:
 def test_rejects_lianlian_exercise_without_name() -> None:
     with pytest.raises(ValueError, match="缺少名称"):
         validate_normalized_workouts(
-            [{"id": "session-1", "exercises": [{"sets": []}]}]
+            [{"id": "session-1", "started_at": "2026-11-21T18:00:00+08:00", "exercises": [{"sets": []}]}]
         )
