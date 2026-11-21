@@ -1,3 +1,4 @@
+import json
 from datetime import date
 
 import pytest
@@ -47,6 +48,33 @@ class SnapshotClient:
 
     async def get_blood_pressure_history(self, relative_uid, query_date, *, days):
         return []
+
+
+
+class RawWeightClient:
+    async def _request(self, method, path, *, params):
+        assert method == "GET"
+        assert path == "/app/v1/data/get_fitness_data_by_time"
+        assert params["key"] == "weight"
+        return {
+            "code": 0,
+            "result": {
+                "data_list": [
+                    {
+                        "sid": "private-scale-row",
+                        "time": 1786579200,
+                        "zone_offset": 28800,
+                        "value": json.dumps({
+                            "weight": 74.8,
+                            "bmi": 24.4,
+                            "body_fat_rate": 20.8,
+                            "muscle_mass": 31.6,
+                        }),
+                    }
+                ],
+                "has_more": False,
+            },
+        }
 
 
 def _bridge_token(uid: str = "42") -> str:
@@ -105,3 +133,15 @@ async def test_snapshot_uses_xiaomi_timezone_and_own_account_uid() -> None:
     assert result["daily_summary"]["steps"] == {"value": 8000}
     assert result["available_data_types"] == ["steps"]
     assert result["metrics"]["steps"] == [{"value": 8000}]
+
+async def test_weight_history_keeps_raw_body_composition_fields() -> None:
+    bridge = HealthBridge(_bridge_token())
+    bridge._client = RawWeightClient()
+
+    result = await bridge.history(None, "weight", "2026-08-13", 1)
+
+    assert result["query_date"] == "2026-08-13"
+    assert result["composition_available"] is True
+    assert result["data"][0]["weight"] == 74.8
+    assert result["data"][0]["body_fat_rate"] == 20.8
+    assert result["data"][0]["muscle_mass"] == 31.6
