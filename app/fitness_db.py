@@ -214,7 +214,9 @@ class FitnessDatabase:
 
     async def initialize(self) -> None:
         async with await self._connect() as conn:
-            await conn.execute(SCHEMA_SQL)
+            for statement in SCHEMA_SQL.split(";"):
+                if statement.strip():
+                    await conn.execute(statement)
 
     async def store_xiaomi(
         self,
@@ -282,6 +284,8 @@ class FitnessDatabase:
                     body_written += 1
 
                 for metric, rows in health_metrics.items():
+                    if not isinstance(rows, list):
+                        continue
                     for row in rows:
                         if not isinstance(row, dict):
                             continue
@@ -383,7 +387,8 @@ class FitnessDatabase:
                             "health_metric_rows": metric_written,
                             "workout_samples": sample_written,
                             "health_metric_errors": [
-                                key for key, rows in health_metrics.items() if rows is None
+                                key for key, rows in health_metrics.items()
+                                if not isinstance(rows, list)
                             ],
                         }),
                         run_id,
