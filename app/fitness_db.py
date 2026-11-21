@@ -339,6 +339,25 @@ health_rollup AS (
     GROUP BY recorded_date, metric
   ) grouped
   GROUP BY recorded_date
+),
+health_values AS (
+  SELECT recorded_date AS day,
+    max(NULLIF(raw_data->>'steps','')::bigint) FILTER (WHERE metric='steps') AS steps,
+    max(NULLIF(raw_data->>'calories','')::double precision) FILTER (WHERE metric='calories') AS daily_calories_kcal,
+    max(NULLIF(raw_data->>'distance','')::double precision) FILTER (WHERE metric='steps') AS walking_distance_m,
+    max(NULLIF(raw_data->>'total_duration','')::integer) FILTER (WHERE metric='sleep') AS sleep_minutes,
+    max(NULLIF(raw_data->>'sleep_score','')::integer) FILTER (WHERE metric='sleep') AS sleep_score,
+    max(NULLIF(raw_data->>'sleep_deep_duration','')::integer) FILTER (WHERE metric='sleep') AS sleep_deep_minutes,
+    max(NULLIF(raw_data->>'sleep_rem_duration','')::integer) FILTER (WHERE metric='sleep') AS sleep_rem_minutes,
+    max(NULLIF(raw_data->>'sleep_light_duration','')::integer) FILTER (WHERE metric='sleep') AS sleep_light_minutes,
+    max(NULLIF(raw_data->>'sleep_awake_duration','')::integer) FILTER (WHERE metric='sleep') AS sleep_awake_minutes,
+    max(NULLIF(raw_data->>'avg_hr','')::double precision) FILTER (WHERE metric='heart_rate') AS average_daily_heart_rate_bpm,
+    max(NULLIF(raw_data->>'avg_rhr','')::double precision) FILTER (WHERE metric='heart_rate') AS resting_heart_rate_bpm,
+    max(NULLIF(raw_data->>'avg_spo2','')::double precision) FILTER (WHERE metric='spo2') AS average_spo2_percent,
+    max(NULLIF(raw_data->>'count','')::integer) FILTER (WHERE metric='valid_stand') AS stand_count,
+    max(NULLIF(raw_data->>'duration','')::integer) FILTER (WHERE metric='intensity') AS intensity_minutes
+  FROM fitness_health_metrics
+  GROUP BY recorded_date
 )
 SELECT d.day,
   b.weight_kg, b.bmi, b.body_fat_rate, b.fat_mass_kg, b.muscle_mass_kg,
@@ -357,12 +376,18 @@ SELECT d.day,
   COALESCE(sr.strength_reps,0) AS strength_reps,
   COALESCE(sr.strength_volume_kg,0) AS strength_volume_kg,
   sr.max_lift_kg,
+  hv.steps, hv.daily_calories_kcal, hv.walking_distance_m,
+  hv.sleep_minutes, hv.sleep_score, hv.sleep_deep_minutes, hv.sleep_rem_minutes,
+  hv.sleep_light_minutes, hv.sleep_awake_minutes,
+  hv.average_daily_heart_rate_bpm, hv.resting_heart_rate_bpm,
+  hv.average_spo2_percent, hv.stand_count, hv.intensity_minutes,
   COALESCE(h.health_metrics,'{}'::jsonb) AS health_metrics
 FROM all_days d
 LEFT JOIN latest_body b ON b.measured_date=d.day
 LEFT JOIN workout_rollup w ON w.day=d.day
 LEFT JOIN strength_rollup sr ON sr.day=d.day
-LEFT JOIN health_rollup h ON h.day=d.day;
+LEFT JOIN health_rollup h ON h.day=d.day
+LEFT JOIN health_values hv ON hv.day=d.day;
 
 CREATE OR REPLACE VIEW fitness_strength_progression AS
 SELECT
@@ -965,7 +990,13 @@ class FitnessDatabase:
                               xiaomi_duration_seconds, strength_duration_seconds,
                               xiaomi_calories_kcal, strength_calories_kcal,
                               strength_set_count, completed_set_count, strength_reps,
-                              strength_volume_kg, max_lift_kg, health_metrics
+                              strength_volume_kg, max_lift_kg, steps,
+                              daily_calories_kcal, walking_distance_m, sleep_minutes,
+                              sleep_score, sleep_deep_minutes, sleep_rem_minutes,
+                              sleep_light_minutes, sleep_awake_minutes,
+                              average_daily_heart_rate_bpm, resting_heart_rate_bpm,
+                              average_spo2_percent, stand_count, intensity_minutes,
+                              health_metrics
                        FROM fitness_daily_overview
                        WHERE day >= %s ORDER BY day DESC LIMIT 500""",
                     (since_date,),
@@ -975,7 +1006,7 @@ class FitnessDatabase:
                 daily = [
                     {
                         key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
-                        for key, value in zip(daily_columns, row)
+                        for key, value in zip(daily_columns, row, strict=True)
                     }
                     for row in daily_rows
                 ]
@@ -992,7 +1023,7 @@ class FitnessDatabase:
                 progression = [
                     {
                         key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
-                        for key, value in zip(progression_columns, row)
+                        for key, value in zip(progression_columns, row, strict=True)
                     }
                     for row in progression_rows
                 ]
@@ -1015,7 +1046,7 @@ class FitnessDatabase:
                 )
                 top_rows = await cur.fetchall()
                 top_columns = [column.name for column in cur.description]
-                top_exercises = [dict(zip(top_columns, row)) for row in top_rows]
+                top_exercises = [dict(zip(top_columns, row, strict=True)) for row in top_rows]
         return {
             "database": "postgresql",
             "window_days": days,
