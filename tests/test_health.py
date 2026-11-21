@@ -56,6 +56,7 @@ class RawWeightClient:
         assert method == "GET"
         assert path == "/app/v1/data/get_fitness_data_by_time"
         assert params["key"] == "weight"
+        assert params["relative_uid"] == 42
         return {
             "code": 0,
             "result": {
