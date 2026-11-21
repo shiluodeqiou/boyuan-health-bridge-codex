@@ -9,6 +9,9 @@ from mi_fitness import AuthToken, MiHealthClient, XiaomiAuth
 from mi_fitness.client import data as _data
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.sports import get_sport_detail as read_sport_detail
+from app.sports import get_sport_records as read_sport_records
+
 Metric = Literal[
     "heart_rate",
     "sleep",
@@ -430,6 +433,28 @@ class HealthBridge:
             "data": [row.model_dump(mode="json") for row in rows],
             "notice": "数据来自当前登录的小米运动健康本人账号，不用于医疗诊断。",
         }
+
+    async def sport_records(
+        self,
+        query_date: str | None = None,
+        days: int = 30,
+    ) -> dict[str, Any]:
+        """Read the current user's individual Xiaomi sport sessions."""
+        if not 1 <= days <= 30:
+            raise ValueError("days 必须在 1 到 30 之间")
+        return await read_sport_records(self._get_client(), query_date, days)
+
+    async def sport_detail(
+        self,
+        workout_time: int,
+        include_track: bool = False,
+    ) -> dict[str, Any]:
+        """Read one workout's detailed samples; GPS is opt-in."""
+        return await read_sport_detail(
+            self._get_client(),
+            workout_time,
+            include_track=include_track,
+        )
 
     def export_token_json(self) -> str:
         if not self._token_json:
