@@ -19,6 +19,7 @@ from starlette.routing import Mount, Route
 
 from app.config import Settings
 from app.fitness_db import FitnessDatabase
+from app.fitness_sync import sync_unified_fitness_data as run_unified_fitness_sync
 from app.fitness_sync import sync_xiaomi_to_database
 from app.health import HealthBridge, Metric
 from app.lianlian import connection_status as lianlian_connection_status
@@ -49,7 +50,8 @@ setup_state = SetupState()
 mcp = MCPServer(
     "柏渊健康桥",
     instructions=("读取当前登录小米账号本人的健康数据，并将小米运动健康与练练健身记录汇总到个人 PostgreSQL 数据库。"
-                  "数据源接口只读；同步工具只写入用户自己的数据库，不修改上游健康或训练记录。"
+                  "数据源接口只读；统一同步工具只写入用户自己的数据库，不修改上游健康或训练记录。"
+                  "分析工具从统一数据库读取跨来源时间轴、身体成分和力量训练趋势。"
                   "健康数据可能有同步延迟，不能用于医疗诊断或紧急情况。"),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(settings.public_base_url),
@@ -149,6 +151,32 @@ async def sync_personal_fitness_data(
         days=days,
         include_sport_details=include_sport_details,
     )
+
+
+@mcp.tool(
+    title="同步统一个人健身数据库",
+    description="一次同步当前登录小米账号本人的体脂秤身体成分、日常健康指标和运动摘要，并通过练练健身官方分页 API 同步力量训练记录、动作和每组数据。默认回看最近 30 天，幂等更新 Neon，不修改两个上游 App。只有两边读取完整且无错误才返回 success。",
+    annotations=WRITE_IDEMPOTENT,
+)
+async def sync_unified_fitness_database(
+    days: int = 30,
+    include_sport_details: bool = False,
+) -> dict:
+    return await run_unified_fitness_sync(
+        health_bridge,
+        fitness_database,
+        days=days,
+        include_sport_details=include_sport_details,
+    )
+
+
+@mcp.tool(
+    title="查看统一健身分析仪表盘",
+    description="从 Neon 读取统一的每日健身时间轴和力量动作进步趋势，包含体重、体脂率、脂肪量、肌肉量、骨骼肌、内脏脂肪、基础代谢、有氧运动时长和热量、力量训练组数、训练容量及估算 1RM。days 为 1 到 3650。",
+    annotations=READ_ONLY,
+)
+async def get_fitness_dashboard(days: int = 90) -> dict:
+    return await fitness_database.dashboard(days)
 
 
 @mcp.tool(
