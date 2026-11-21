@@ -90,6 +90,30 @@ async def get_health_history(
 
 
 @mcp.tool(
+    title="读取小米运动记录",
+    description="读取当前登录小米账号本人指定日期范围内的逐次运动记录，包括运动类型、起止时间、时长、距离、活动热量、平均/最高心率、配速等摘要指标。days 为 1 到 30。",
+    annotations=READ_ONLY,
+)
+async def get_sport_records(
+    query_date: str | None = None,
+    days: int = 30,
+) -> dict:
+    return await health_bridge.sport_records(query_date, days)
+
+
+@mcp.tool(
+    title="读取单次运动详情",
+    description="按运动记录列表中的 workout_time（Unix 秒）读取单次运动逐秒采样详情。支持的户外跑步/骑行可返回心率、累计距离、配速/速度等采样；GPS 轨迹默认关闭，只有明确需要时才设置 include_track=true。",
+    annotations=READ_ONLY,
+)
+async def get_sport_detail(
+    workout_time: int,
+    include_track: bool = False,
+) -> dict:
+    return await health_bridge.sport_detail(workout_time, include_track)
+
+
+@mcp.tool(
     title="检查健康桥状态",
     description="检查小米凭证是否已经配置；不会返回任何密钥或完整账号信息。",
     annotations=READ_ONLY,
