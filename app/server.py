@@ -90,6 +90,18 @@ async def get_health_history(
 
 
 @mcp.tool(
+    title="读取体脂秤身体成分",
+    description="读取当前登录小米账号本人最近指定天数的原始体重与体脂秤身体成分记录，包括体脂率、脂肪量、肌肉量、骨骼肌量、骨量、蛋白质、水分、内脏脂肪、基础代谢等设备实际提供的字段。days 为 1 到 3650；不会将缺失字段补成 0。",
+    annotations=READ_ONLY,
+)
+async def get_body_composition_history(
+    query_date: str | None = None,
+    days: int = 30,
+) -> dict:
+    return await health_bridge.body_composition_history(query_date, days)
+
+
+@mcp.tool(
     title="读取小米运动记录",
     description="读取当前登录小米账号本人指定日期范围内的逐次运动记录，包括运动类型、起止时间、时长、距离、活动热量、平均/最高心率、配速等摘要指标。days 为 1 到 30。",
     annotations=READ_ONLY,
