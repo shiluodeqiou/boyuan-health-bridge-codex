@@ -299,23 +299,101 @@ class HealthBridge:
         names = [member.relative_note or str(member.relative_uid) for member in members]
         raise ValueError(f"存在多位亲友，请指定其中一位：{', '.join(names)}")
 
-    async def snapshot(self, relative: str | None) -> dict[str, Any]:
+    async def snapshot(
+        self,
+        relative: str | None,
+        query_date: str | None = None,
+    ) -> dict[str, Any]:
+        """Build a complete daily snapshot from the working per-metric history APIs.
+
+        The Xiaomi own-account latest-data endpoint is not consistently available.
+        Historical metric endpoints are used instead so one unsupported endpoint
+        cannot break the entire summary.
+        """
         client = self._get_client()
         member = await self.resolve_relative(relative)
-        snapshot = await client.get_latest_data(member.relative_uid)
-        latest_time = member.latest_data_time or snapshot.updated_time
-        query_date = (
-            datetime.fromtimestamp(latest_time, tz=_XIAOMI_TIMEZONE).date()
-            if latest_time > 0
-            else date.today()
+        selected_date = (
+            date.fromisoformat(query_date)
+            if query_date
+            else datetime.now(_XIAOMI_TIMEZONE).date()
         )
-        summary = await client.get_daily_summary(member.relative_uid, query_date)
+
+        method_names = {
+            "heart_rate": "get_heart_rate",
+            "sleep": "get_sleep",
+            "steps": "get_steps",
+            "calories": "get_calories_history",
+            "spo2": "get_spo2_history",
+            "intensity": "get_intensity_history",
+            "valid_stand": "get_valid_stand_history",
+            "weight": "get_weight_history",
+            "blood_pressure": "get_blood_pressure_history",
+        }
+
+        async def read_metric(metric: str) -> tuple[str, list[dict[str, Any]], str | None]:
+            try:
+                method = getattr(client, method_names[metric])
+                rows = await method(member.relative_uid, selected_date, days=1)
+                serialized = [
+                    row.model_dump(mode="json") if hasattr(row, "model_dump") else row
+                    for row in rows
+                ]
+                return metric, serialized, None
+            except Exception as exc:
+                # Keep error details minimal: provider responses may contain private data.
+                return metric, [], type(exc).__name__
+
+        results = await asyncio.gather(*(read_metric(metric) for metric in method_names))
+        metrics: dict[str, list[dict[str, Any]]] = {}
+        errors: dict[str, str] = {}
+        for metric, rows, error_type in results:
+            metrics[metric] = rows
+            if error_type:
+                errors[metric] = error_type
+
+        if errors and len(errors) == len(method_names):
+            failed = ", ".join(f"{name} ({kind})" for name, kind in errors.items())
+            raise RuntimeError(f"所有健康分项接口均读取失败：{failed}")
+
+        latest: dict[str, Any] = {"updated_time": 0}
+        for metric, rows in metrics.items():
+            if not rows:
+                latest[metric] = None
+                continue
+            latest_row = max(
+                rows,
+                key=lambda row: (
+                    row.get("time", 0) if isinstance(row, dict) else 0
+                ),
+            )
+            latest[metric] = latest_row
+            if isinstance(latest_row, dict):
+                latest["updated_time"] = max(
+                    latest["updated_time"],
+                    latest_row.get("time", 0) or 0,
+                )
+
+        daily_summary = {
+            "date": selected_date.isoformat(),
+            "relative_uid": member.relative_uid,
+            **{
+                metric: (rows[0] if rows else None)
+                for metric, rows in metrics.items()
+            },
+        }
+
         return {
             "relative": member.model_dump(mode="json"),
+            "query_date": selected_date.isoformat(),
             "shared_data_types": None,
-            "latest": snapshot.model_dump(mode="json"),
-            "daily_summary": summary.model_dump(mode="json"),
-            "notice": "数据来自小米运动健康最近一次亲友共享同步，不用于医疗诊断。",
+            "available_data_types": [
+                metric for metric, rows in metrics.items() if rows
+            ],
+            "latest": latest,
+            "daily_summary": daily_summary,
+            "metrics": metrics,
+            "errors": errors,
+            "notice": "数据来自当前登录的小米运动健康本人账号；部分指标可能因未记录或未开放而为空，不用于医疗诊断。",
         }
 
     async def history(
@@ -349,7 +427,7 @@ class HealthBridge:
             "query_date": parsed_date.isoformat() if parsed_date else None,
             "days": days,
             "data": [row.model_dump(mode="json") for row in rows],
-            "notice": "数据来自小米运动健康亲友共享，不用于医疗诊断。",
+            "notice": "数据来自当前登录的小米运动健康本人账号，不用于医疗诊断。",
         }
 
     def export_token_json(self) -> str:
