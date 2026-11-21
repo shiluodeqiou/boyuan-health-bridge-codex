@@ -19,6 +19,13 @@ class FakeClient:
 
 
 class SnapshotClient:
+    async def _request(self, method, path, *, params):
+        assert method == "GET"
+        assert path == "/app/v1/data/get_fitness_data_by_time"
+        assert params["key"] == "weight"
+        assert "relative_uid" not in params
+        return {"code": 0, "result": {"data_list": [], "has_more": False}}
+
     async def get_heart_rate(self, relative_uid, query_date, *, days):
         return []
 
@@ -56,7 +63,10 @@ class RawWeightClient:
         assert method == "GET"
         assert path == "/app/v1/data/get_fitness_data_by_time"
         assert params["key"] == "weight"
-        assert params["relative_uid"] == 42
+        assert params["reverse"] is True
+        assert params["startTime"] < params["endTime"]
+        assert params["endTime"] - params["startTime"] == 86_400_000
+        assert "relative_uid" not in params
         return {
             "code": 0,
             "result": {
