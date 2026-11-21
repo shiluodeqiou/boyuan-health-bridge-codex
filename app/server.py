@@ -47,7 +47,8 @@ setup_state = SetupState()
 
 mcp = MCPServer(
     "柏渊健康桥",
-    instructions=("读取当前登录小米账号本人的健康数据。所有工具均为只读。"
+    instructions=("读取当前登录小米账号本人的健康数据，并将小米运动健康与练练健身记录汇总到个人 PostgreSQL 数据库。"
+                  "数据源接口只读；同步工具只写入用户自己的数据库，不修改上游健康或训练记录。"
                   "健康数据可能有同步延迟，不能用于医疗诊断或紧急情况。"),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(settings.public_base_url),
@@ -192,7 +193,10 @@ async def ingest_lianlian_workouts(records: list[dict]) -> dict:
     annotations=READ_ONLY,
 )
 async def get_bridge_status() -> dict:
-    return health_bridge.safe_status()
+    status = health_bridge.safe_status()
+    status["fitness_database_configured"] = fitness_database.configured
+    status["lianlian_configured"] = lianlian_connection_status()["configured"]
+    return status
 
 
 def _no_store(response: HTMLResponse | JSONResponse | RedirectResponse):
