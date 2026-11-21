@@ -77,6 +77,23 @@ CREATE TABLE IF NOT EXISTS fitness_health_metrics (
 CREATE INDEX IF NOT EXISTS idx_health_metrics_date
     ON fitness_health_metrics (metric, recorded_date DESC);
 
+-- A daily metric has one canonical row per source, metric and local calendar date.
+-- Keep the latest provider response when upgrading from the earlier hash-based key.
+DELETE FROM fitness_health_metrics
+WHERE ctid IN (
+    SELECT ctid FROM (
+        SELECT ctid,
+               row_number() OVER (
+                   PARTITION BY source, metric, recorded_date
+                   ORDER BY updated_at DESC, recorded_at DESC, ctid DESC
+               ) AS row_num
+        FROM fitness_health_metrics
+    ) ranked
+    WHERE row_num > 1
+);
+CREATE UNIQUE INDEX IF NOT EXISTS uq_fitness_health_metrics_day
+    ON fitness_health_metrics (source, metric, recorded_date);
+
 CREATE TABLE IF NOT EXISTS fitness_workout_sessions (
     source TEXT NOT NULL,
     external_id TEXT NOT NULL,
@@ -331,13 +348,16 @@ strength_rollup AS (
   WHERE s.source='lianlian'
   GROUP BY 1
 ),
+latest_health AS (
+  SELECT DISTINCT ON (source, recorded_date, metric)
+    source, recorded_date, metric, recorded_at, raw_data
+  FROM fitness_health_metrics
+  ORDER BY source, recorded_date, metric, updated_at DESC, recorded_at DESC
+),
 health_rollup AS (
-  SELECT recorded_date AS day, jsonb_object_agg(metric, metric_rows) AS health_metrics
-  FROM (
-    SELECT recorded_date, metric, jsonb_agg(raw_data ORDER BY recorded_at) AS metric_rows
-    FROM fitness_health_metrics
-    GROUP BY recorded_date, metric
-  ) grouped
+  SELECT recorded_date AS day, jsonb_object_agg(metric, raw_data) AS health_metrics
+  FROM latest_health
+  WHERE source='xiaomi'
   GROUP BY recorded_date
 ),
 health_values AS (
@@ -356,7 +376,8 @@ health_values AS (
     max(NULLIF(raw_data->>'avg_spo2','')::double precision) FILTER (WHERE metric='spo2') AS average_spo2_percent,
     max(NULLIF(raw_data->>'count','')::integer) FILTER (WHERE metric='valid_stand') AS stand_count,
     max(NULLIF(raw_data->>'duration','')::integer) FILTER (WHERE metric='intensity') AS intensity_minutes
-  FROM fitness_health_metrics
+  FROM latest_health
+  WHERE source='xiaomi'
   GROUP BY recorded_date
 )
 SELECT d.day,
@@ -641,8 +662,10 @@ class FitnessDatabase:
                             """INSERT INTO fitness_health_metrics
                                (source, metric, recorded_at, recorded_date, record_hash, raw_data)
                                VALUES (%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT (source, metric, recorded_at, record_hash)
-                               DO UPDATE SET raw_data=EXCLUDED.raw_data, updated_at=now()""",
+                               ON CONFLICT (source, metric, recorded_date)
+                               DO UPDATE SET recorded_at=EXCLUDED.recorded_at,
+                                 record_hash=EXCLUDED.record_hash,
+                                 raw_data=EXCLUDED.raw_data, updated_at=now()""",
                             (
                                 source, metric, recorded_at, recorded_at.astimezone(CN_TZ).date(),
                                 _json_hash(row), Jsonb(row),
