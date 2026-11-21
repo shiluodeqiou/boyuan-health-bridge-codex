@@ -518,6 +518,12 @@ class FitnessDatabase:
         body_rows = body_composition.get("data", [])
         workout_rows = sport_records.get("records", [])
         details = sport_details or {}
+        sync_status = (
+            "partial"
+            if body_composition.get("history_complete") is False
+            or any(not isinstance(rows, list) for rows in health_metrics.values())
+            else "success"
+        )
         run_id: int | None = None
         body_written = workout_written = metric_written = sample_written = 0
         now = datetime.now(timezone.utc)
@@ -691,12 +697,13 @@ class FitnessDatabase:
                        DO UPDATE SET last_success_at=EXCLUDED.last_success_at,
                          latest_record_at=EXCLUDED.latest_record_at,
                          records_seen=EXCLUDED.records_seen""",
-                    (source, resource, now, latest_record_at, len(body_rows) + len(workout_rows)),
+                    (source, resource, now if sync_status == "success" else None, latest_record_at, len(body_rows) + len(workout_rows)),
                 )
                 await conn.execute(
-                    """UPDATE fitness_sync_runs SET status='success', finished_at=now(),
+                    """UPDATE fitness_sync_runs SET status=%s, finished_at=now(),
                        records_seen=%s, records_written=%s, details=%s WHERE id=%s""",
                     (
+                        sync_status,
                         len(body_rows) + len(workout_rows) + metric_written,
                         body_written + workout_written + metric_written + sample_written,
                         Jsonb({
