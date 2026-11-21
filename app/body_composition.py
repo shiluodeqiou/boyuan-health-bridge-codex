@@ -5,8 +5,7 @@ from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
 
 FITNESS_DATA_PATH = "/app/v1/data/get_fitness_data_by_time"
-MAX_PAGES = 40
-PAGE_SIZE = 200
+MAX_PAGES = 200
 XIAOMI_TIMEZONE = timezone(timedelta(hours=8))
 
 # Preserve Xiaomi's wire names as normalized snake_case fields.
@@ -267,7 +266,7 @@ def _merge_records(
     weight = record.get("weight")
     bmi = record.get("bmi")
     if sid:
-        identity = f"sid:{sid}"
+        identity = f"sid:{sid}:time:{record['time']}"
     elif weight is not None:
         identity = f"measurement:{record['time']}:{weight}:{bmi}"
     else:
@@ -295,52 +294,91 @@ def _merge_records(
 
 async def _fetch_weight_rows(
     client: Any,
-    relative_uid: int,
     start_time: int,
     end_time: int,
     notes: list[str],
-) -> tuple[list[dict[str, Any]], int]:
+) -> tuple[list[dict[str, Any]], int, int, bool]:
+    """Read the owner's own-account weight stream using its native cursor contract.
+
+    The own-account endpoint is not the relatives endpoint: it takes camelCase
+    millisecond bounds and a snake_case next_key cursor, and does not take
+    relative_uid or limit.
+    """
+    end_time_ms = end_time * 1000
     request: dict[str, Any] = {
-        "relative_uid": relative_uid,
         "key": "weight",
-        "start_time": max(1, start_time - 86400),
-        "end_time": end_time,
-        "limit": PAGE_SIZE,
+        # Xiaomi's cursor can freeze when startTime is 0/1 or too old.
+        # A recent one-day anchor plus next_key walks backwards through history.
+        "startTime": max(1, end_time_ms - 86_400_000),
+        "endTime": end_time_ms,
+        "reverse": True,
     }
     rows_out: list[dict[str, Any]] = []
     seen_cursors: set[str] = set()
+    fetched_count = 0
+    pages_fetched = 0
+    has_more = False
+
     for page in range(MAX_PAGES):
         payload = await client._request("GET", FITNESS_DATA_PATH, params=request)
-        result = payload.get("result") if isinstance(payload, dict) else None
-        if not isinstance(result, dict):
+        if not isinstance(payload, dict):
             raise RuntimeError("小米体重接口返回格式异常")
+        code = payload.get("code")
+        if code not in (None, 0, "0"):
+            raise RuntimeError(f"小米体重接口返回错误 code={code}")
+        result = payload.get("result")
+        if not isinstance(result, dict):
+            raise RuntimeError("小米体重接口缺少 result")
         rows = result.get("data_list", [])
         if not isinstance(rows, list):
             raise RuntimeError("小米体重接口缺少 data_list")
+
+        pages_fetched += 1
+        page_timestamps: list[int] = []
         for row in rows:
-            if isinstance(row, dict) and not _is_true(row.get("deleted")):
-                timestamp = _epoch_seconds(row.get("time"))
-                if timestamp is not None and start_time <= timestamp <= end_time:
-                    rows_out.append(row)
-        if not _is_true(result.get("has_more")):
+            if not isinstance(row, dict) or _is_true(row.get("deleted")):
+                continue
+            timestamp = _epoch_seconds(row.get("time"))
+            if timestamp is None:
+                value = _decode_object(row.get("value"))
+                timestamp = _epoch_seconds(value.get("time"))
+            if timestamp is None:
+                continue
+            page_timestamps.append(timestamp)
+            if start_time <= timestamp <= end_time:
+                rows_out.append(row)
+                fetched_count += 1
+
+        # The own-account API returns newest-first pages. Once the entire page
+        # is older than the requested window, all later cursor pages are older.
+        if page_timestamps and max(page_timestamps) < start_time:
+            has_more = False
             break
+
+        if not _is_true(result.get("has_more")):
+            has_more = False
+            break
+
         cursor = result.get("next_key")
         if cursor is None or not str(cursor) or str(cursor) in seen_cursors:
             notes.append("体重记录分页游标缺失或重复，已停止读取，结果可能不完整。")
+            has_more = True
             break
+
         cursor_text = str(cursor)
         seen_cursors.add(cursor_text)
         request = {
-            "relative_uid": relative_uid,
             "key": "weight",
-            "start_time": max(1, start_time - 86400),
-            "end_time": end_time,
-            "limit": PAGE_SIZE,
+            "startTime": max(1, end_time_ms - 86_400_000),
+            "endTime": end_time_ms,
+            "reverse": True,
             "next_key": cursor_text,
         }
         if page == MAX_PAGES - 1:
-            notes.append("体重记录达到单次读取页数上限，较早记录可能未包含。")
-    return rows_out, len(rows_out)
+            has_more = True
+            notes.append("体重记录达到单次读取页数上限，仍有历史页未读取；请缩短查询范围。")
+
+    return rows_out, fetched_count, pages_fetched, has_more
 
 
 async def get_body_composition_history(
@@ -348,19 +386,13 @@ async def get_body_composition_history(
     query_date: str | None = None,
     days: int = 30,
     *,
-    relative_uid: int | None = None,
 ) -> dict[str, Any]:
     """Read the owner's full raw weight/body-composition history."""
     start_day, end_day, start_time, end_time = _date_window(query_date, days)
-    if relative_uid is None:
-        token = getattr(getattr(client, "auth", None), "token", None)
-        relative_uid = _as_int(getattr(token, "user_id", None))
-    if relative_uid is None:
-        raise RuntimeError("读取体脂秤历史需要当前本人账号 UID")
 
     notes: list[str] = []
-    rows, fetched_count = await _fetch_weight_rows(
-        client, relative_uid, start_time, end_time, notes
+    rows, fetched_count, pages_fetched, has_more = await _fetch_weight_rows(
+        client, start_time, end_time, notes
     )
     records: list[dict[str, Any]] = []
     index: dict[str, int] = {}
@@ -386,6 +418,9 @@ async def get_body_composition_history(
         "days": days,
         "count": len(records),
         "fetched_count": fetched_count,
+        "pages_fetched": pages_fetched,
+        "has_more": has_more,
+        "history_complete": not has_more,
         "records_with_composition": sum(
             any(field in record for field in composition_fields) for record in records
         ),
