@@ -128,6 +128,25 @@ async def test_paginates_deduplicates_and_skips_deleted_scale_rows() -> None:
     assert result["history_complete"] is True
 
 
+async def test_same_device_sid_keeps_distinct_daily_measurements() -> None:
+    first = _row("same-device")
+    second = _row("same-device", body_fat_rate=20.7)
+    second_time = MEASURED_AT - 86_400
+    second["time"] = second_time
+    second_value = json.loads(second["value"])
+    second_value["time"] = second_time
+    second_value["weight"] = 75.1
+    second["value"] = json.dumps(second_value)
+    client = FakeClient([
+        {"code": 0, "result": {"data_list": [first, second], "has_more": False}}
+    ])
+
+    result = await get_body_composition_history(client, "2026-11-21", days=2)
+
+    assert result["count"] == 2
+    assert {row["weight"] for row in result["data"]} == {74.85, 75.1}
+
+
 async def test_preserves_missing_composition_as_unavailable_not_zero() -> None:
     row = {
         "sid": "weight-only",
