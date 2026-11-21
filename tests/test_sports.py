@@ -135,7 +135,7 @@ def test_fds_file_reference_matches_verified_identifier_vector() -> None:
         {"time": 1_700_000_000, "timezone": 32, "proto_type": 8},
         0,
     )
-    assert free_training_suffix.startswith("APFTZSDY_")
+    assert free_training_suffix.startswith("APFTZSCg_")
 
 
 async def test_rejects_invalid_history_window() -> None:
