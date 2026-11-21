@@ -4,7 +4,7 @@ import json
 
 import pytest
 
-from app.sports import _fds_ref, get_sport_detail, get_sport_records
+from app.sports import _decode_record_file, _fds_ref, get_sport_detail, get_sport_records
 
 
 START = 1_795_190_400  # 2026-11-21 00:00:00 Asia/Shanghai
@@ -82,6 +82,43 @@ async def test_non_fds_sport_detail_returns_summary_without_fabricating_samples(
     assert any("没有已验证" in note for note in result["notes"])
 
 
+def test_decodes_free_training_v3_samples() -> None:
+    validity = bytes([0xCC, 0xCC])
+    body = (
+        struct.pack("<II", 2, START)
+        + b"\\x00"
+        + bytes([138, 2, 97, 12, 145, 3, 96, 14])
+    )
+    plain = struct.pack("<IbBBB", START, 32, 3, 8, 0) + validity + body
+
+    samples, header = _decode_record_file(plain, START, 32, 8)
+
+    assert header["version"] == 3
+    assert len(samples) == 2
+    assert samples[0] == {
+        "time": START,
+        "heart_rate_bpm": 138,
+        "calories_raw": 2,
+        "spo2_percent": 97,
+        "stress_raw": 12,
+    }
+    assert samples[1]["heart_rate_bpm"] == 145
+    assert samples[1]["spo2_percent"] == 96
+
+
+def test_decodes_free_training_v2_samples() -> None:
+    validity = bytes([0xC0])
+    body = struct.pack("<II", 2, START) + b"\\x00" + bytes([120, 5, 125, 6])
+    plain = struct.pack("<IbBBB", START, 32, 2, 8, 0) + validity + body
+
+    samples, _ = _decode_record_file(plain, START, 32, 8)
+
+    assert samples == [
+        {"time": START, "heart_rate_bpm": 120, "calories_raw": 5},
+        {"time": START + 1, "heart_rate_bpm": 125, "calories_raw": 6},
+    ]
+
+
 def test_fds_file_reference_matches_verified_identifier_vector() -> None:
     timestamp, suffix = _fds_ref(
         "1234567890",
@@ -91,6 +128,13 @@ def test_fds_file_reference_matches_verified_identifier_vector() -> None:
 
     assert timestamp == 1_700_000_000
     assert suffix == "APFTZSDY_AbMHrLpPVPVar8M7sGu79sqAPpo"
+
+    _, free_training_suffix = _fds_ref(
+        "1234567890",
+        {"time": 1_700_000_000, "timezone": 32, "proto_type": 8},
+        0,
+    )
+    assert free_training_suffix.startswith("APFTZSDY_")
 
 
 async def test_rejects_invalid_history_window() -> None:
