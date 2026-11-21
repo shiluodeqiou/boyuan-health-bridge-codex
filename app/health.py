@@ -9,6 +9,7 @@ from mi_fitness import AuthToken, MiHealthClient, XiaomiAuth
 from mi_fitness.client import data as _data
 from pydantic import BaseModel, ConfigDict, ValidationError
 
+from app.body_composition import get_body_composition_history as read_body_composition_history
 from app.sports import get_sport_detail as read_sport_detail
 from app.sports import get_sport_records as read_sport_records
 
@@ -336,6 +337,12 @@ class HealthBridge:
 
         async def read_metric(metric: str) -> tuple[str, list[dict[str, Any]], str | None]:
             try:
+                if metric == "weight":
+                    composition = await read_body_composition_history(
+                        client, selected_date.isoformat(), days=1
+                    )
+                    if composition["data"]:
+                        return metric, composition["data"], None
                 method = getattr(client, method_names[metric])
                 rows = await method(member.relative_uid, selected_date, days=1)
                 serialized = [
@@ -423,6 +430,17 @@ class HealthBridge:
             "weight": "get_weight_history",
             "blood_pressure": "get_blood_pressure_history",
         }
+        if metric == "weight":
+            composition = await read_body_composition_history(
+                client,
+                parsed_date.isoformat() if parsed_date else None,
+                days=days,
+            )
+            return {
+                "relative": member.model_dump(mode="json"),
+                "metric": metric,
+                **composition,
+            }
         method = getattr(client, method_names[metric])
         rows = await method(member.relative_uid, parsed_date, days=days)
         return {
@@ -433,6 +451,16 @@ class HealthBridge:
             "data": [row.model_dump(mode="json") for row in rows],
             "notice": "数据来自当前登录的小米运动健康本人账号，不用于医疗诊断。",
         }
+
+    async def body_composition_history(
+        self,
+        query_date: str | None = None,
+        days: int = 30,
+    ) -> dict[str, Any]:
+        """Read the full raw body-composition fields from Xiaomi weight records."""
+        return await read_body_composition_history(
+            self._get_client(), query_date, days=days
+        )
 
     async def sport_records(
         self,
