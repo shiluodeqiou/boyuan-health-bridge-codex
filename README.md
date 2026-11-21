@@ -77,7 +77,8 @@
 - \`sync_unified_fitness_database(days=30, include_sport_details=false)\`：同步小米身体成分、日常健康指标、运动摘要，以及练练官方训练记录。练练接口自动分页，全部页面确认 \`hasMore=false\` 后才写入；按来源 ID 幂等更新。
 - \`sync_personal_fitness_data(days=30, include_sport_details=false)\`：仅同步小米数据。
 - \`get_fitness_database_summary(days=30)\`：查看来源记录数和最近同步任务。
-- \`get_fitness_dashboard(days=90)\`：读取每日统一时间轴、身体成分变化、运动时长/热量、力量训练组数/容量和动作进步趋势。
+- \`get_fitness_dashboard(days=90, include_details=false)\`：默认读取轻量汇总，包含体重、体脂率、脂肪量、肌肉量的首末值和 7 日均值，以及按周训练次数、完成组数、有氧时长和热量；设置 \`include_details=true\` 才读取每日时间轴、动作进步和健康指标明细。
+- \`get_fat_loss_summary(days=30)\`：专门用于最近减脂效果评价的紧凑接口，所有指标直接由 Neon 服务端聚合，不请求小米或练练健身上游接口。
 - \`get_lianlian_skill_manifest()\`：安全读取练练当前技能说明。
 - \`get_lianlian_training_records_page(start_date, end_date, page, page_size)\`：只读诊断练练原始分页，不写数据库。
 - \`ingest_lianlian_workouts(records)\`：接收已标准化训练数据的底层导入工具。
@@ -87,6 +88,8 @@
 ### 同步策略
 
 统一同步默认回看最近 30 天，采用重叠窗口幂等 upsert：可捕获迟到写入或最近修改的记录，同时避免重复。每日自动同步由 ChatGPT Automation 调用统一同步 MCP 工具执行；如果自动化尚未创建，需要在连接与部署验证完成后启用。
+
+读取路径会在进程内缓存数据库初始化状态，避免每次 MCP 查询重复执行 DDL 和历史迁移。减脂摘要和默认仪表盘只返回聚合字段，原始身体成分与逐组 JSON 只在明细模式中读取。
 
 ## 本地开发
 

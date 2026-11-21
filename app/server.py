@@ -172,11 +172,20 @@ async def sync_unified_fitness_database(
 
 @mcp.tool(
     title="查看统一健身分析仪表盘",
-    description="从 Neon 读取统一的每日健身时间轴和力量动作进步趋势，包含体重、体脂率、脂肪量、肌肉量、骨骼肌、内脏脂肪、基础代谢、有氧运动时长和热量、力量训练组数、训练容量及估算 1RM。days 为 1 到 3650。",
+    description="从 Neon 读取统一健身分析。默认返回轻量汇总，包含体重、体脂率、脂肪量、肌肉量的首末值和 7 日均值，以及按周训练次数、完成组数、有氧时长和热量。需要逐日趋势、动作进步和原始健康指标时设置 include_details=true。days 为 1 到 3650。",
     annotations=READ_ONLY,
 )
-async def get_fitness_dashboard(days: int = 90) -> dict:
-    return await fitness_database.dashboard(days)
+async def get_fitness_dashboard(days: int = 90, include_details: bool = False) -> dict:
+    return await fitness_database.dashboard(days, include_details=include_details)
+
+
+@mcp.tool(
+    title="查看最近减脂摘要",
+    description="直接从 Neon 返回最近指定天数的减脂摘要。包含体重、体脂率、脂肪量、肌肉量的首末值、变化量和 7 日均值，以及按周训练次数、完成组数、有氧时长和热量。不会读取小米或练练健身上游接口，也不会传输原始身体成分 JSON。days 为 1 到 3650，默认 30 天。",
+    annotations=READ_ONLY,
+)
+async def get_fat_loss_summary(days: int = 30) -> dict:
+    return await fitness_database.fat_loss_summary(days)
 
 
 @mcp.tool(

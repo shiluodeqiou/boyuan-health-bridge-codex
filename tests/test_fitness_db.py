@@ -2,7 +2,16 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
-from app.fitness_db import SCHEMA_SQL, _as_date, _as_datetime, _record_time, _source_id
+import pytest
+
+from app.fitness_db import (
+    SCHEMA_SQL,
+    FitnessDatabase,
+    _as_date,
+    _as_datetime,
+    _record_time,
+    _source_id,
+)
 
 
 def test_parses_unix_seconds_and_timezone_aware_iso() -> None:
@@ -44,3 +53,21 @@ def test_unified_schema_contains_body_composition_and_analytics_views() -> None:
     assert "fitness_strength_progression" in SCHEMA_SQL
     assert "uq_fitness_health_metrics_day" in SCHEMA_SQL
     assert "latest_health AS" in SCHEMA_SQL
+
+
+def test_metric_summary_uses_first_last_and_recent_seven_values() -> None:
+    rows = [
+        {"weight_kg": 80.0},
+        {"weight_kg": 79.5},
+        {"weight_kg": 79.0},
+        {"weight_kg": 78.5},
+        {"weight_kg": 78.0},
+        {"weight_kg": 77.5},
+        {"weight_kg": 77.0},
+        {"weight_kg": 76.5},
+    ]
+    summary = FitnessDatabase._metric_summary(rows, "weight_kg")
+    assert summary["first"] == 80.0
+    assert summary["last"] == 76.5
+    assert summary["change"] == -3.5
+    assert summary["seven_day_average"] == pytest.approx(78.0)

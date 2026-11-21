@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
 import os
@@ -63,6 +64,8 @@ CREATE TABLE IF NOT EXISTS fitness_body_measurements (
 );
 CREATE INDEX IF NOT EXISTS idx_body_measurements_date
     ON fitness_body_measurements (measured_date DESC);
+CREATE INDEX IF NOT EXISTS idx_body_measurements_day_time
+    ON fitness_body_measurements (measured_date, measured_at DESC);
 
 CREATE TABLE IF NOT EXISTS fitness_health_metrics (
     source TEXT NOT NULL,
@@ -536,6 +539,12 @@ def _as_date(value: Any) -> date | None:
 class FitnessDatabase:
     """Persistent PostgreSQL store for normalized fitness data and original payloads."""
 
+    def __init__(self) -> None:
+        # Schema migration is expensive on a remote Neon connection.  Keep it out of
+        # every read request, while still serializing the first concurrent request.
+        self._initialized = False
+        self._initialize_lock = asyncio.Lock()
+
     @property
     def configured(self) -> bool:
         return bool(os.getenv("DATABASE_URL", "").strip())
@@ -544,10 +553,17 @@ class FitnessDatabase:
         return await psycopg.AsyncConnection.connect(_database_url())
 
     async def initialize(self) -> None:
-        async with await self._connect() as conn:
-            for statement in SCHEMA_SQL.split(";"):
-                if statement.strip():
-                    await conn.execute(statement)
+        if self._initialized:
+            return
+        async with self._initialize_lock:
+            if self._initialized:
+                return
+            async with await self._connect() as conn:
+                async with conn.transaction():
+                    for statement in SCHEMA_SQL.split(";"):
+                        if statement.strip():
+                            await conn.execute(statement)
+            self._initialized = True
 
     async def store_xiaomi(
         self,
@@ -996,9 +1012,146 @@ class FitnessDatabase:
         }
 
 
-    async def dashboard(self, days: int = 90) -> dict[str, Any]:
+    @staticmethod
+    def _metric_summary(rows: list[dict[str, Any]], key: str) -> dict[str, Any]:
+        values = [row[key] for row in rows if row.get(key) is not None]
+        if not values:
+            return {"first": None, "last": None, "change": None, "seven_day_average": None}
+        first = values[0]
+        last = values[-1]
+        return {
+            "first": first,
+            "last": last,
+            "change": last - first,
+            "seven_day_average": sum(values[-7:]) / len(values[-7:]),
+        }
+
+    async def fat_loss_summary(self, days: int = 30) -> dict[str, Any]:
+        """Return a compact body-composition and weekly-training summary.
+
+        This query deliberately excludes raw JSON payloads.  It is the fast path for
+        ordinary progress questions, while ``dashboard(include_details=True)`` keeps
+        the larger historical response available for deeper analysis.
+        """
         if not 1 <= days <= 3650:
             raise ValueError("days 必须在 1 到 3650 之间")
+        await self.initialize()
+        until_date = datetime.now(CN_TZ).date()
+        since_date = until_date - timedelta(days=days - 1)
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """WITH daily AS (
+                           SELECT DISTINCT ON (measured_date)
+                               measured_date, weight_kg, body_fat_rate,
+                               fat_mass_kg, muscle_mass_kg
+                           FROM fitness_body_measurements
+                           WHERE measured_date >= %s
+                           ORDER BY measured_date, measured_at DESC
+                       )
+                       SELECT measured_date, weight_kg, body_fat_rate,
+                              fat_mass_kg, muscle_mass_kg
+                       FROM daily
+                       ORDER BY measured_date""",
+                    (since_date,),
+                )
+                body_rows = await cur.fetchall()
+                body_columns = [column.name for column in cur.description]
+                body_daily = [
+                    {
+                        key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
+                        for key, value in zip(body_columns, row, strict=True)
+                    }
+                    for row in body_rows
+                ]
+
+                await cur.execute(
+                    """WITH sessions AS (
+                           SELECT COALESCE(session_date,
+                                           (started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
+                                  source, modality, duration_seconds,
+                                  COALESCE(active_calories_kcal, total_calories_kcal,
+                                           calories_kcal) AS calories_kcal,
+                                  external_id
+                           FROM fitness_workout_sessions
+                           WHERE session_date >= %s
+                              OR (session_date IS NULL AND started_at >= %s)
+                       ),
+                       weekly_sessions AS (
+                           SELECT date_trunc('week', day::timestamp)::date AS week_start,
+                                  count(*) FILTER (WHERE source='lianlian') AS strength_sessions,
+                                  count(*) FILTER (WHERE source='xiaomi'
+                                                   AND modality='cardio') AS cardio_sessions,
+                                  round(COALESCE(sum(duration_seconds) FILTER (
+                                      WHERE source='xiaomi' AND modality='cardio'), 0) / 60.0, 1)
+                                      AS cardio_duration_minutes,
+                                  COALESCE(sum(calories_kcal) FILTER (
+                                      WHERE source='xiaomi' AND modality='cardio'), 0)
+                                      AS cardio_calories_kcal
+                           FROM sessions
+                           GROUP BY 1
+                       ),
+                       weekly_sets AS (
+                           SELECT date_trunc('week', s.day::timestamp)::date AS week_start,
+                                  count(*) AS sets_recorded,
+                                  count(*) FILTER (WHERE st.is_completed IS TRUE)
+                                      AS completed_sets
+                           FROM sessions s
+                           JOIN fitness_strength_exercises e
+                             ON e.source=s.source AND e.external_id=s.external_id
+                           JOIN fitness_strength_sets st
+                             ON st.source=e.source AND st.external_id=e.external_id
+                            AND st.exercise_index=e.exercise_index
+                           WHERE s.source='lianlian'
+                           GROUP BY 1
+                       )
+                       SELECT ws.week_start, ws.strength_sessions, ws.cardio_sessions,
+                              ws.cardio_duration_minutes, ws.cardio_calories_kcal,
+                              COALESCE(wt.sets_recorded, 0) AS sets_recorded,
+                              COALESCE(wt.completed_sets, 0) AS completed_sets
+                       FROM weekly_sessions ws
+                       LEFT JOIN weekly_sets wt USING (week_start)
+                       ORDER BY ws.week_start""",
+                    (since_date, datetime.combine(since_date, time.min, tzinfo=CN_TZ)),
+                )
+                training_rows = await cur.fetchall()
+                training_columns = [column.name for column in cur.description]
+                training_by_week = [
+                    {
+                        key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
+                        for key, value in zip(training_columns, row, strict=True)
+                    }
+                    for row in training_rows
+                ]
+
+        body_composition = {
+            "measurement_days": len(body_daily),
+            "first_date": body_daily[0]["measured_date"] if body_daily else None,
+            "last_date": body_daily[-1]["measured_date"] if body_daily else None,
+            "weight_kg": self._metric_summary(body_daily, "weight_kg"),
+            "body_fat_rate": self._metric_summary(body_daily, "body_fat_rate"),
+            "fat_mass_kg": self._metric_summary(body_daily, "fat_mass_kg"),
+            "muscle_mass_kg": self._metric_summary(body_daily, "muscle_mass_kg"),
+        }
+        return {
+            "database": "postgresql",
+            "window_days": days,
+            "since_date": since_date.isoformat(),
+            "until_date": until_date.isoformat(),
+            "body_composition": body_composition,
+            "training_by_week": training_by_week,
+            "notes": [
+                "首末值按每天最后一次体脂秤测量计算；7日均值只使用最近 7 个有记录的测量日。",
+                "训练汇总由 Neon 服务端聚合，普通分析不会传输原始身体成分或逐组 JSON。",
+                "力量训练只统计练练健身记录；有氧时长和热量只统计小米运动中的 cardio 会话。",
+            ],
+        }
+
+    async def dashboard(self, days: int = 90, include_details: bool = False) -> dict[str, Any]:
+        if not 1 <= days <= 3650:
+            raise ValueError("days 必须在 1 到 3650 之间")
+        if not include_details:
+            return await self.fat_loss_summary(days)
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
         async with await self._connect() as conn:
@@ -1088,31 +1241,53 @@ class FitnessDatabase:
         if not 1 <= days <= 3650:
             raise ValueError("days 必须在 1 到 3650 之间")
         await self.initialize()
-        since = datetime.now(CN_TZ) - timedelta(days=days)
+        since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
-                    """SELECT source, count(*) FROM fitness_body_measurements
-                       WHERE measured_date >= %s GROUP BY source ORDER BY source""",
-                    (since.date(),),
+                    """SELECT
+                           COALESCE((
+                               SELECT jsonb_object_agg(source, records)
+                               FROM (
+                                   SELECT source, count(*) AS records
+                                   FROM fitness_body_measurements
+                                   WHERE measured_date >= %s
+                                   GROUP BY source
+                               ) body_counts
+                           ), '{}'::jsonb) AS body_counts,
+                           COALESCE((
+                               SELECT jsonb_object_agg(source, records)
+                               FROM (
+                                   SELECT source, count(*) AS records
+                                   FROM fitness_workout_sessions
+                                   WHERE session_date >= %s
+                                      OR (session_date IS NULL
+                                          AND started_at >= %s)
+                                   GROUP BY source
+                               ) workout_counts
+                           ), '{}'::jsonb) AS workout_counts,
+                           COALESCE((
+                               SELECT jsonb_agg(
+                                   jsonb_build_object(
+                                       'source', source,
+                                       'metric', metric,
+                                       'records', records
+                                   ) ORDER BY source, metric
+                               )
+                               FROM (
+                                   SELECT source, metric, count(*) AS records
+                                   FROM fitness_health_metrics
+                                   WHERE recorded_date >= %s
+                                   GROUP BY source, metric
+                               ) metric_counts
+                           ), '[]'::jsonb) AS metric_counts""",
+                    (since_date, since_date,
+                     datetime.combine(since_date, time.min, tzinfo=CN_TZ), since_date),
                 )
-                body_counts = {row[0]: row[1] for row in await cur.fetchall()}
-                await cur.execute(
-                    """SELECT source, count(*) FROM fitness_workout_sessions
-                       WHERE COALESCE(session_date, (started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s
-                       GROUP BY source ORDER BY source""",
-                    (since.date(),),
-                )
-                workout_counts = {row[0]: row[1] for row in await cur.fetchall()}
-                await cur.execute(
-                    """SELECT source, metric, count(*) FROM fitness_health_metrics
-                       WHERE recorded_date >= %s GROUP BY source, metric ORDER BY source, metric""",
-                    (since.date(),),
-                )
-                metric_counts = [
-                    {"source": row[0], "metric": row[1], "records": row[2]}
-                    for row in await cur.fetchall()
-                ]
+                counts = await cur.fetchone()
+                body_counts = counts[0] or {}
+                workout_counts = counts[1] or {}
+                metric_counts = counts[2] or []
                 await cur.execute(
                     """SELECT source, resource, status, started_at, finished_at,
                               records_seen, records_written, details
