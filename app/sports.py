@@ -451,7 +451,7 @@ def _decode_gps_file(plain: bytes, expected_time: int, expected_tz: int, proto: 
     points = []
     for _ in range(count):
         point = {}
-        for name, size, fmt, _since in selected:
+        for name, _size, fmt, _since in selected:
             if fmt is None:
                 continue
             value, offset = _unpack_value(plain, offset, fmt)
