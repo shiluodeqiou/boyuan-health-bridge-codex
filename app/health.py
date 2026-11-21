@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
@@ -257,11 +258,13 @@ class HealthBridge:
                 user_id = token.user_id
             except ValueError:
                 pass
+        render_commit = os.getenv("RENDER_GIT_COMMIT", "")
         return {
             "ok": True,
             "configured": self.configured,
             "xiaomi_user_id_suffix": user_id[-4:] if user_id else None,
             "mode": "read_only_own_account",
+            "build_commit": render_commit[:7] if render_commit else None,
         }
 
     def _get_client(self) -> MiHealthClient:
