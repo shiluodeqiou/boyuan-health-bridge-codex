@@ -10,6 +10,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
 dependencies = [
+  "cryptography>=44,<47",
   "httpx>=0.28.1,<1",
   "mcp>=2.0.0,<3",
   "mi-fitness==0.2.0",
