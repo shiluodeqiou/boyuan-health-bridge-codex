@@ -422,6 +422,8 @@ def _decode_record_file(plain: bytes, expected_time: int, expected_tz: int, prot
     header, validity = _header(plain, 0)
     if (header["timestamp"], header["timezone"], header["proto_type"]) != (expected_time, expected_tz, proto):
         raise ValueError("FDS 文件头与运动记录不匹配")
+    if proto == 8:
+        return _decode_free_training_record_file(plain, expected_time, expected_tz)
     if header["storage_mode"] != 0 or not validity:
         raise ValueError("FDS 文件压缩模式或版本暂不支持")
     version = header["version"]
