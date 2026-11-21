@@ -85,6 +85,11 @@ def validate_normalized_workouts(records: list[dict[str, Any]]) -> list[dict[str
         )
         if external_id is None:
             raise ValueError(f"第 {index + 1} 条训练记录缺少 id")
+        if not any(
+            record.get(key) not in (None, "")
+            for key in ("started_at", "start_time", "time", "date", "workout_date", "created_at")
+        ):
+            raise ValueError(f"第 {index + 1} 条训练记录缺少训练时间")
         exercises = record.get("exercises", [])
         if not isinstance(exercises, list):
             raise ValueError(f"第 {index + 1} 条训练记录的 exercises 必须是数组")
