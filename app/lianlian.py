@@ -88,7 +88,7 @@ def _api_headers(token: str, skill_version: str = SKILL_VERSION) -> dict[str, st
 
 def _validate_training_query(start_date: str, end_date: str, page: int, page_size: int) -> None:
     for name, value in (("start_date", start_date), ("end_date", end_date)):
-        if not re.fullmatch(r"\\d{8}", value or ""):
+        if not re.fullmatch(r"\d{8}", value or ""):
             raise ValueError(f"{name} 必须使用 yyyyMMdd 格式")
         try:
             datetime.strptime(value, "%Y%m%d")
