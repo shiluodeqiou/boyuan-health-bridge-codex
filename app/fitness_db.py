@@ -262,8 +262,132 @@ SET provider_set_id = COALESCE(st.provider_set_id, st.raw_data->>'_id'),
       WHEN st.raw_data ? 'isDone' THEN (st.raw_data->>'isDone')::boolean
       ELSE st.is_completed END,
     completed_at = COALESCE(st.completed_at,
-      CASE WHEN NULLIF(st.raw_data->>'doneTs','') ~ '^[0-9]+(\\.[0-9]+)?
+      CASE WHEN NULLIF(st.raw_data->>'doneTs','') ~ '^[0-9]+$'
+           THEN to_timestamp((st.raw_data->>'doneTs')::double precision) END),
+    is_new_rm1_record = CASE
+      WHEN st.raw_data ? 'isNewRM1Record' THEN (st.raw_data->>'isNewRM1Record')::boolean
+      ELSE st.is_new_rm1_record END,
+    rm1_weight_kg = COALESCE(st.rm1_weight_kg,
+      CASE WHEN ex.weight_unit='kg'
+           THEN NULLIF(st.raw_data->>'rm1Weight','')::double precision END),
+    set_time_text = COALESCE(st.set_time_text, st.raw_data->>'time'),
+    heart_rate_data = COALESCE(st.heart_rate_data, st.raw_data->'hr'),
+    flag = COALESCE(st.flag, st.raw_data->>'flag'),
+    comb_groups = COALESCE(st.raw_data->'combGroups', '[]'::jsonb)
+FROM fitness_strength_exercises AS ex
+WHERE st.source='lianlian'
+  AND ex.source=st.source
+  AND ex.external_id=st.external_id
+  AND ex.exercise_index=st.exercise_index;
 
+CREATE OR REPLACE VIEW fitness_daily_overview AS
+WITH all_days AS (
+  SELECT measured_date AS day FROM fitness_body_measurements
+  UNION
+  SELECT recorded_date AS day FROM fitness_health_metrics
+  UNION
+  SELECT COALESCE(session_date, (started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day
+  FROM fitness_workout_sessions
+  WHERE session_date IS NOT NULL OR started_at IS NOT NULL
+),
+latest_body AS (
+  SELECT DISTINCT ON (measured_date)
+    measured_date, weight_kg, bmi, body_fat_rate, fat_mass_kg,
+    muscle_mass_kg, skeletal_muscle_mass_kg, body_age, body_score,
+    bone_mass_kg, protein_mass_kg, body_water_mass_kg, fat_free_mass_kg,
+    visceral_fat_level, basal_metabolism_kcal, waist_hip_ratio,
+    moisture_rate_percent, protein_rate_percent, segmental_metrics
+  FROM fitness_body_measurements
+  ORDER BY measured_date, measured_at DESC
+),
+workout_rollup AS (
+  SELECT COALESCE(session_date, (started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
+    count(*) FILTER (WHERE source='xiaomi') AS xiaomi_workout_count,
+    count(*) FILTER (WHERE source='lianlian') AS strength_session_count,
+    sum(duration_seconds) FILTER (WHERE source='xiaomi') AS xiaomi_duration_seconds,
+    sum(duration_seconds) FILTER (WHERE source='lianlian') AS strength_duration_seconds,
+    sum(COALESCE(active_calories_kcal,total_calories_kcal,calories_kcal))
+      FILTER (WHERE source='xiaomi') AS xiaomi_calories_kcal,
+    sum(calories_kcal) FILTER (WHERE source='lianlian') AS strength_calories_kcal
+  FROM fitness_workout_sessions
+  WHERE session_date IS NOT NULL OR started_at IS NOT NULL
+  GROUP BY 1
+),
+strength_rollup AS (
+  SELECT COALESCE(s.session_date, (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
+    count(*) AS strength_set_count,
+    count(*) FILTER (WHERE st.is_completed IS TRUE) AS completed_set_count,
+    sum(st.reps) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS strength_reps,
+    sum(st.weight_kg * st.reps)
+      FILTER (WHERE st.weight_kg IS NOT NULL AND st.reps IS NOT NULL
+              AND st.is_completed IS DISTINCT FROM FALSE) AS strength_volume_kg,
+    max(st.weight_kg) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS max_lift_kg
+  FROM fitness_workout_sessions s
+  JOIN fitness_strength_exercises e
+    ON e.source=s.source AND e.external_id=s.external_id
+  JOIN fitness_strength_sets st
+    ON st.source=e.source AND st.external_id=e.external_id
+   AND st.exercise_index=e.exercise_index
+  WHERE s.source='lianlian'
+  GROUP BY 1
+),
+health_rollup AS (
+  SELECT recorded_date AS day, jsonb_object_agg(metric, metric_rows) AS health_metrics
+  FROM (
+    SELECT recorded_date, metric, jsonb_agg(raw_data ORDER BY recorded_at) AS metric_rows
+    FROM fitness_health_metrics
+    GROUP BY recorded_date, metric
+  ) grouped
+  GROUP BY recorded_date
+)
+SELECT d.day,
+  b.weight_kg, b.bmi, b.body_fat_rate, b.fat_mass_kg, b.muscle_mass_kg,
+  b.skeletal_muscle_mass_kg, b.body_age, b.body_score, b.bone_mass_kg,
+  b.protein_mass_kg, b.body_water_mass_kg, b.fat_free_mass_kg,
+  b.visceral_fat_level, b.basal_metabolism_kcal, b.waist_hip_ratio,
+  b.moisture_rate_percent, b.protein_rate_percent, b.segmental_metrics,
+  COALESCE(w.xiaomi_workout_count,0) AS xiaomi_workout_count,
+  COALESCE(w.strength_session_count,0) AS strength_session_count,
+  COALESCE(w.xiaomi_duration_seconds,0) AS xiaomi_duration_seconds,
+  COALESCE(w.strength_duration_seconds,0) AS strength_duration_seconds,
+  COALESCE(w.xiaomi_calories_kcal,0) AS xiaomi_calories_kcal,
+  COALESCE(w.strength_calories_kcal,0) AS strength_calories_kcal,
+  COALESCE(sr.strength_set_count,0) AS strength_set_count,
+  COALESCE(sr.completed_set_count,0) AS completed_set_count,
+  COALESCE(sr.strength_reps,0) AS strength_reps,
+  COALESCE(sr.strength_volume_kg,0) AS strength_volume_kg,
+  sr.max_lift_kg,
+  COALESCE(h.health_metrics,'{}'::jsonb) AS health_metrics
+FROM all_days d
+LEFT JOIN latest_body b ON b.measured_date=d.day
+LEFT JOIN workout_rollup w ON w.day=d.day
+LEFT JOIN strength_rollup sr ON sr.day=d.day
+LEFT JOIN health_rollup h ON h.day=d.day;
+
+CREATE OR REPLACE VIEW fitness_strength_progression AS
+SELECT
+  COALESCE(s.session_date, (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) AS session_date,
+  e.exercise_name,
+  count(*) AS set_count,
+  count(*) FILTER (WHERE st.is_completed IS TRUE) AS completed_set_count,
+  sum(st.reps) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS total_reps,
+  sum(st.weight_kg * st.reps)
+    FILTER (WHERE st.weight_kg IS NOT NULL AND st.reps IS NOT NULL
+            AND st.is_completed IS DISTINCT FROM FALSE) AS volume_kg,
+  max(st.weight_kg) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS max_weight_kg,
+  max(st.weight_kg * (1 + st.reps / 30.0))
+    FILTER (WHERE st.weight_kg > 0 AND st.reps > 0
+            AND st.is_completed IS DISTINCT FROM FALSE) AS best_estimated_1rm_kg
+FROM fitness_workout_sessions s
+JOIN fitness_strength_exercises e
+  ON e.source=s.source AND e.external_id=s.external_id
+JOIN fitness_strength_sets st
+  ON st.source=e.source AND st.external_id=e.external_id
+ AND st.exercise_index=e.exercise_index
+WHERE s.source='lianlian'
+GROUP BY 1, e.exercise_name;
+
+"""
 
 def _database_url() -> str:
     value = os.getenv("DATABASE_URL", "").strip()
