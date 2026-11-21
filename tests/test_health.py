@@ -154,7 +154,7 @@ async def test_snapshot_bypasses_upstream_relative_lookup_and_uses_xiaomi_timezo
     bridge = HealthBridge("synthetic")
     bridge._client = SnapshotClient()
 
-    result = await bridge.snapshot("小叶")
+    result = await bridge.snapshot("小叶", "2026-08-13")
 
     assert result["daily_summary"]["date"] == "2026-08-13"
     assert result["daily_summary"]["steps"] == {"value": 8000}
