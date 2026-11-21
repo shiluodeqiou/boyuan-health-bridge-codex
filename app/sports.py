@@ -19,7 +19,6 @@ FDS_URL_PATH = "/healthapp/service/gen_download_url"
 FDS_SIGN_PATH = "/service/gen_download_url"
 FDS_IV = b"1234567887654321"
 MAX_PAGES = 20
-MAX_FDS_WORKOUTS = 1
 MAX_FDS_BYTES = 16 * 1024 * 1024
 MAX_SAMPLE_OUTPUT = 1200
 MAX_TRACK_OUTPUT = 1000
@@ -27,9 +26,7 @@ CN_TZ = timezone(timedelta(hours=8))
 
 SPORT_NAMES = {
     1: "户外跑步",
-    2: "室内跑步",
     6: "户外骑行",
-    7: "室内骑行",
     300: "爬楼机",
     308: "力量训练",
 }
@@ -141,6 +138,7 @@ async def _fetch_sport_rows(
         "start_time": start_epoch_s - 1,
         "end_time": end_epoch_s,
         "limit": 50,
+        "reverse": True,
     }
     seen: set[str] = set()
     rows: list[tuple[dict[str, Any], dict[str, Any]]] = []
@@ -171,6 +169,7 @@ async def _fetch_sport_rows(
             "start_time": start_epoch_s - 1,
             "end_time": end_epoch_s,
             "limit": 50,
+            "reverse": True,
             "next_key": cursor,
         }
         if page == MAX_PAGES - 1:
@@ -269,12 +268,12 @@ async def _request_fds_entries(client: Any, sid: str, items: list[dict[str, Any]
     for attempt in range(2):
         token = client.auth.token
         nonce_params = build_encrypted_params(
-            "POST", FDS_SIGN_PATH, token.ssecurity, {"did": sid, "items": items}
+            "GET", FDS_SIGN_PATH, token.ssecurity, {"did": sid, "items": items}
         )
         cookies = {"cUserId": token.c_user_id, "serviceToken": token.service_token}
-        response = await client._http.post(
+        response = await client._http.get(
             client.base_url.rstrip("/") + FDS_URL_PATH,
-            data=nonce_params,
+            params=nonce_params,
             cookies=cookies,
         )
         if response.status_code == 401 and attempt == 0:
