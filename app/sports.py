@@ -74,6 +74,7 @@ GPS_FIELDS = [
     ("locationSpeedAndGpsSource", 2, "<H", 2), ("gpsSourceValid", 0, None, 2),
 ]
 VALIDITY_LENGTHS = {
+    (8, 0): {1: 1, 2: 1, 3: 2, 4: 2, 5: 2},
     (22, 0): {1: 2, 2: 3, 3: 3, 4: 3, 5: 5, 6: 6, 7: 6, 8: 7},
     (23, 0): {1: 2, 2: 2, 3: 3, 4: 3, 5: 3, 6: 3, 7: 4},
     (22, 2): {1: 1, 2: 1, 3: 1, 4: 1, 5: 2},
@@ -252,7 +253,7 @@ def _fds_ref(sid: str, value: dict[str, Any], file_type: int) -> tuple[int, str]
     proto = _int(value.get("proto_type"))
     if not sid or timestamp is None or not 0 < timestamp < 2**32:
         raise ValueError("运动记录缺少可用的 FDS 时间标识")
-    if tz15 is None or not -128 <= tz15 <= 127 or proto not in (22, 23):
+    if tz15 is None or not -128 <= tz15 <= 127 or proto not in (8, 22, 23):
         raise ValueError("该运动格式暂不支持读取逐秒明细")
     key_bytes = struct.pack("<Ib", timestamp, tz15) + bytes([((1 << 7) + (proto << 2) + file_type) & 0xFF])
     suffix = f"{_b64url(key_bytes)}_{_b64url(hashlib.sha1(sid.encode('utf-8'), usedforsecurity=False).digest())}"
@@ -349,6 +350,72 @@ def _header(plain: bytes, file_type: int) -> tuple[dict[str, Any], bytes]:
 def _unpack_value(data: bytes, offset: int, fmt: str) -> tuple[int | float, int]:
     size = struct.calcsize(fmt)
     return struct.unpack_from(fmt, data, offset)[0], offset + size
+
+
+def _decode_free_training_record_file(
+    plain: bytes, expected_time: int, expected_tz: int
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Decode the verified Mi Fitness free-training family (proto 8)."""
+    header, validity = _header(plain, 0)
+    if (header["timestamp"], header["timezone"], header["proto_type"]) != (
+        expected_time, expected_tz, 8
+    ):
+        raise ValueError("FDS 文件头与自由训练记录不匹配")
+    version = header["version"]
+    expected_validity_len = VALIDITY_LENGTHS.get((8, 0), {}).get(version)
+    if header["storage_mode"] != 0 or expected_validity_len is None:
+        raise ValueError(f"自由训练 FDS 版本 {version} 或存储模式暂不支持")
+    if len(validity) != expected_validity_len:
+        raise ValueError("自由训练 FDS 有效性标记长度异常")
+
+    # Versions 1–2 use two one-dimensional channels; v3–v5 use four
+    # four-dimensional channels. The IT summary is 1B from v2, +4B from
+    # v4, and +6B from v5. No pause-init block is present in this family.
+    if version <= 2:
+        valid_fields = [
+            ("heart_rate_bpm", bool(validity[0] & 0x80)),
+            ("calories_raw", bool(validity[0] & 0x40)),
+        ]
+        record_size = sum(1 for _, valid in valid_fields if valid)
+    else:
+        valid_fields = []
+        for index, name in enumerate(
+            ("heart_rate_bpm", "calories_raw", "spo2_percent", "stress_raw")
+        ):
+            nibble = validity[index // 2] >> 4 if index % 2 == 0 else validity[index // 2] & 0x0F
+            valid_fields.append((name, bool(nibble & 0x8), bool(nibble & 0x4)))
+        record_size = sum(1 for _, exists, _ in valid_fields if exists)
+
+    it_bytes = (1 if version >= 2 else 0) + (4 if version >= 4 else 0) + (6 if version >= 5 else 0)
+    offset = 8 + len(validity)
+    samples: list[dict[str, Any]] = []
+    total_points = 0
+    while offset + 8 + it_bytes <= len(plain):
+        count, start_time = struct.unpack_from("<II", plain, offset)
+        offset += 8 + it_bytes
+        total_points += count
+        if total_points > 1_000_000:
+            raise ValueError("自由训练 FDS 采样点数量异常")
+        if count and (not record_size or count * record_size > len(plain) - offset):
+            raise ValueError("自由训练 FDS 采样点长度异常")
+        for index in range(count):
+            point: dict[str, Any] = {"time": start_time + index}
+            if version <= 2:
+                for name, valid in valid_fields:
+                    if valid:
+                        value = plain[offset]
+                        offset += 1
+                        point[name] = value
+            else:
+                for name, exists, high_valid in valid_fields:
+                    if not exists:
+                        continue
+                    value = plain[offset]
+                    offset += 1
+                    if high_valid:
+                        point[name] = value
+            samples.append(point)
+    return samples, header
 
 
 def _decode_record_file(plain: bytes, expected_time: int, expected_tz: int, proto: int) -> tuple[list[dict[str, Any]], dict[str, Any]]:
@@ -493,7 +560,7 @@ async def get_sport_detail(
     row, value = selected
     summary = _normalize_workout(row, value)
     proto = _int(value.get("proto_type"))
-    if proto not in (22, 23):
+    if proto not in (8, 22, 23):
         return {
             "workout": summary,
             "detail_supported": False,
@@ -521,7 +588,9 @@ async def get_sport_detail(
             "notes": notes + ["该运动记录缺少明细文件所需的时间或时区信息。"],
         }
 
-    file_types = [0, 2] if include_track else [0]
+    file_types = [0, 2] if include_track and proto in (22, 23) else [0]
+    if include_track and proto == 8:
+        notes.append("自由训练记录不请求 GPS 轨迹；已仅读取逐秒运动采样。")
     refs = []
     request_items = []
     server_keys = []
