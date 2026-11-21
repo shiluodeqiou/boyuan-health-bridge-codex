@@ -341,14 +341,11 @@ class HealthBridge:
         async def read_metric(metric: str) -> tuple[str, list[dict[str, Any]], str | None]:
             try:
                 if metric == "weight":
-                    try:
-                        composition = await read_body_composition_history(
-                            client,
-                            selected_date.isoformat(),
-                            days=1,
-                        )
-                    except Exception:
-                        raise
+                    composition = await read_body_composition_history(
+                        client,
+                        selected_date.isoformat(),
+                        days=1,
+                    )
                     return metric, composition["data"], None
                 method = getattr(client, method_names[metric])
                 rows = await method(member.relative_uid, selected_date, days=1)
