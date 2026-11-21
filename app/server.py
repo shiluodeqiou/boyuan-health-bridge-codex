@@ -65,7 +65,7 @@ async def list_family_members() -> list[dict]:
 
 @mcp.tool(
     title="读取本人健康摘要",
-    description="读取当前登录小米账号本人的最新健康快照和每日摘要。",
+    description="读取当前登录小米账号本人的最新健康快照和每日摘要；若原始体重接口可用，也会包含体脂率、肌肉量等身体成分。",
     annotations=READ_ONLY,
 )
 async def get_health_snapshot(
@@ -77,7 +77,7 @@ async def get_health_snapshot(
 
 @mcp.tool(
     title="读取本人健康历史",
-    description="按日期读取当前登录小米账号本人的心率、睡眠、步数、血氧、卡路里等历史数据。",
+    description="按日期读取当前登录小米账号本人的心率、睡眠、步数、血氧、卡路里等历史数据；查询 weight 时会保留原始体脂秤身体成分字段。",
     annotations=READ_ONLY,
 )
 async def get_health_history(
