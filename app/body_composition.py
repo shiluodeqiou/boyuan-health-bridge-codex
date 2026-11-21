@@ -385,7 +385,6 @@ async def get_body_composition_history(
     client: Any,
     query_date: str | None = None,
     days: int = 30,
-    *,
 ) -> dict[str, Any]:
     """Read the owner's full raw weight/body-composition history."""
     start_day, end_day, start_time, end_time = _date_window(query_date, days)
