@@ -103,7 +103,7 @@ async def get_sport_records(
 
 @mcp.tool(
     title="读取单次运动详情",
-    description="按运动记录列表中的 workout_time（Unix 秒）读取单次运动逐秒采样详情。支持的户外跑步/骑行可返回心率、累计距离、配速/速度等采样；GPS 轨迹默认关闭，只有明确需要时才设置 include_track=true。",
+    description="按运动记录列表中的 workout_time（Unix 秒）读取单次运动逐秒采样详情。支持自由训练/力量训练（proto 8，含爬楼机记录）以及已验证的户外跑步/骑行格式；可返回心率及设备提供的其他采样指标。GPS 轨迹默认关闭，只有明确需要时才设置 include_track=true。",
     annotations=READ_ONLY,
 )
 async def get_sport_detail(
