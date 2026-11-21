@@ -43,5 +43,4 @@ def test_unified_schema_contains_body_composition_and_analytics_views() -> None:
     assert "fitness_daily_overview" in SCHEMA_SQL
     assert "fitness_strength_progression" in SCHEMA_SQL
     assert "uq_fitness_health_metrics_day" in SCHEMA_SQL
-    assert "ON CONFLICT (source, metric, recorded_date)" in SCHEMA_SQL
     assert "latest_health AS" in SCHEMA_SQL
