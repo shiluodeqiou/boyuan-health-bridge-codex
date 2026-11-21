@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "boyuan-health-bridge"
 version = "0.1.0"
-description = "Read-only MCP bridge for Xiaomi Mi Fitness family sharing data"
+description = "Read-only MCP bridge for Xiaomi Mi Fitness own-account health and workout data"
 readme = "README.md"
 requires-python = ">=3.11"
 license = { text = "GPL-3.0-only" }
