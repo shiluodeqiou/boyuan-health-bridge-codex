@@ -138,7 +138,7 @@ def _setup_authorized(request: Request) -> bool:
 async def home(_: Request) -> HTMLResponse:
     body = """<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>
     <title>柏渊健康桥</title><style>body{font:16px system-ui;max-width:720px;margin:60px auto;padding:0 20px;line-height:1.7}a{color:#165dff}</style>
-    <h1>柏渊健康桥</h1><p>小米运动健康亲友共享数据的只读 MCP 服务。</p>
+    <h1>柏渊健康桥</h1><p>小米运动健康本人数据与运动记录的只读 MCP 服务。</p>
     <p><a href='/setup'>配置小米登录</a> · <a href='/health'>服务状态</a></p>"""
     return HTMLResponse(body)
 
@@ -171,7 +171,7 @@ async def approve_get(request: Request) -> HTMLResponse:
     safe_ticket = html.escape(ticket, quote=True)
     body = f"""<!doctype html><meta charset=utf-8><meta name=viewport content='width=device-width'>
     <title>授权柏渊健康桥</title><style>body{{font:16px system-ui;max-width:520px;margin:50px auto;padding:0 20px;line-height:1.7}}input,button{{box-sizing:border-box;width:100%;padding:12px;margin-top:12px;font-size:16px}}button{{background:#111;color:white;border:0;border-radius:8px}}</style>
-    <h1>授权健康数据读取</h1><p>允许 ChatGPT 只读访问你已经共享给此小米账号的健康数据。</p>
+    <h1>授权健康数据读取</h1><p>允许 ChatGPT 只读访问当前登录的小米账号本人健康数据和运动记录。</p>
     <form method=post action='/approve'><input type=hidden name=ticket value='{safe_ticket}'>
     <label>连接密码<input type=password name=password autocomplete=current-password required></label>
     <button type=submit>确认授权</button></form><p><small>不会授予修改、邀请或删除权限。</small></p>"""
