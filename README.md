@@ -35,6 +35,7 @@
 - `list_family_members`：确认当前登录的小米账号本人。
 - `get_health_snapshot`：读取本人最新健康快照和每日摘要。
 - `get_health_history`：按日期读取心率、睡眠、步数、血氧、卡路里等历史数据；查询 `weight` 时保留原始体脂秤身体成分字段。
+- `get_body_composition_history`：按本人账号原始接口读取 1–3650 天体脂秤记录；按 `(设备 sid, 测量时间)` 去重，避免同一设备多次称重被合并；使用 `pages_fetched`、`has_more` 和 `history_complete` 明确报告分页完整性。
 - `get_sport_records`：读取本人逐次运动记录，含运动类型、起止时间、时长、距离、热量和心率等摘要。
 - `get_sport_detail`：读取单次运动逐秒采样；目前覆盖自由训练/力量训练（proto 8，FDS v1–v5）、已验证的户外跑步/骑行格式，可返回心率及设备提供的其他采样指标；GPS 轨迹默认关闭。
 - `get_bridge_status`：检查桥接服务是否已配置，不返回任何密钥。
