@@ -18,12 +18,18 @@ from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 from starlette.routing import Mount, Route
 
 from app.config import Settings
+from app.fitness_db import FitnessDatabase
+from app.fitness_sync import sync_xiaomi_to_database
 from app.health import HealthBridge, Metric
+from app.lianlian import connection_status as lianlian_connection_status
+from app.lianlian import get_skill_manifest as read_lianlian_skill_manifest
+from app.lianlian import validate_normalized_workouts
 from app.oauth import BridgeOAuthProvider, SignedTokens
 
 settings = Settings.from_env()
 signer = SignedTokens(settings.signing_secret)
 health_bridge = HealthBridge(settings.mi_token_json)
+fitness_database = FitnessDatabase()
 oauth_provider = BridgeOAuthProvider(settings.public_base_url, settings.mcp_url, signer)
 
 
@@ -52,6 +58,7 @@ mcp = MCPServer(
 )
 
 READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempotent_hint=True)
+WRITE_IDEMPOTENT = ToolAnnotations(read_only_hint=False, destructive_hint=False, idempotent_hint=True)
 
 
 @mcp.tool(
@@ -123,6 +130,60 @@ async def get_sport_detail(
     include_track: bool = False,
 ) -> dict:
     return await health_bridge.sport_detail(workout_time, include_track)
+
+
+@mcp.tool(
+    title="同步小米数据到个人健身数据库",
+    description="将本人最近 1–30 天的小米体脂秤身体成分、逐次运动记录，以及心率、睡眠、步数、热量、血氧等日常指标写入 PostgreSQL 个人健身数据库。按来源 ID 和时间幂等去重；默认同步运动摘要，可选同步逐秒运动采样。需要先配置 DATABASE_URL。",
+    annotations=WRITE_IDEMPOTENT,
+)
+async def sync_personal_fitness_data(
+    days: int = 30,
+    include_sport_details: bool = False,
+) -> dict:
+    return await sync_xiaomi_to_database(
+        health_bridge,
+        fitness_database,
+        days=days,
+        include_sport_details=include_sport_details,
+    )
+
+
+@mcp.tool(
+    title="查看个人健身数据库概况",
+    description="查看统一数据库中按来源统计的体脂秤记录、运动训练记录、日常健康指标和最近同步任务。",
+    annotations=READ_ONLY,
+)
+async def get_fitness_database_summary(days: int = 30) -> dict:
+    return await fitness_database.summary(days)
+
+
+@mcp.tool(
+    title="检查练练健身连接",
+    description="检查 Render 是否配置练练健身 API Token；不会返回密钥。",
+    annotations=READ_ONLY,
+)
+async def get_lianlian_connection_status() -> dict:
+    return lianlian_connection_status()
+
+
+@mcp.tool(
+    title="读取练练健身最新技能说明",
+    description="使用 Render 环境变量中的 LIANLIAN_API_TOKEN 请求练练健身官方 AI skill 接口，读取最新的只读训练记录 API 说明；不会暴露 Token。",
+    annotations=READ_ONLY,
+)
+async def get_lianlian_skill_manifest() -> dict:
+    return await read_lianlian_skill_manifest()
+
+
+@mcp.tool(
+    title="导入练练健身力量训练记录",
+    description="将练练健身适配器标准化后的训练记录写入统一数据库。每条记录需包含 id、started_at 或 date，以及 exercises 数组；动作包含 name 和 sets，组包含 weight_kg、reps、duration_seconds、rest_seconds。原始字段完整保留。正式自动同步适配器将在确认练练最新技能说明后接入。",
+    annotations=WRITE_IDEMPOTENT,
+)
+async def ingest_lianlian_workouts(records: list[dict]) -> dict:
+    normalized = validate_normalized_workouts(records)
+    return await fitness_database.store_lianlian(normalized)
 
 
 @mcp.tool(
