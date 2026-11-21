@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import json
 
-import pytest
-
 from app.sports import _fds_ref, get_sport_detail, get_sport_records
+
+import pytest
 
 
 START = 1_795_190_400  # 2026-11-21 00:00:00 Asia/Shanghai
