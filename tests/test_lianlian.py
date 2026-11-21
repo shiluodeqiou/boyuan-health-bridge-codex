@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import pytest
 
-from app.lianlian import get_skill_manifest, validate_normalized_workouts
+from app.lianlian import (
+    _api_headers,
+    _validate_training_query,
+    get_skill_manifest,
+    get_training_records_page,
+    validate_normalized_workouts,
+)
 
 
 def test_requires_lianlian_token_without_exposing_secret(monkeypatch) -> None:
@@ -47,3 +53,52 @@ def test_rejects_lianlian_exercise_without_name() -> None:
         validate_normalized_workouts(
             [{"id": "session-1", "started_at": "2026-11-21T18:00:00+08:00", "exercises": [{"sets": []}]}]
         )
+
+
+
+def test_training_records_query_enforces_official_page_limit() -> None:
+    _validate_training_query("20261101", "20261121", 1, 50)
+    with pytest.raises(ValueError, match="page_size"):
+        _validate_training_query("20261101", "20261121", 1, 51)
+    with pytest.raises(ValueError, match="yyyyMMdd"):
+        _validate_training_query("2026-11-01", "20261121", 1, 50)
+    with pytest.raises(ValueError, match="不能晚于"):
+        _validate_training_query("20261122", "20261121", 1, 50)
+
+
+def test_api_headers_include_keepstrong_contract() -> None:
+    headers = _api_headers("secret-token")
+    assert headers["Authorization"] == "Bearer secret-token"
+    assert headers["X-KeepStrong-Skill-Version"] == "1.29.0"
+    assert headers["X-KeepStrong-Agent-Name"] == "ChatGPT"
+
+
+@pytest.mark.asyncio
+async def test_training_records_page_returns_raw_payload_without_writing(monkeypatch) -> None:
+    import httpx
+    import app.lianlian as lianlian
+
+    monkeypatch.setattr(lianlian, "_token", lambda: "test-token")
+    calls = []
+
+    async def fake_request(token, **kwargs):
+        calls.append((token, kwargs))
+        return httpx.Response(
+            200,
+            json={"records": [{"id": "record-1"}], "page": 1, "hasMore": False},
+            request=httpx.Request("GET", "https://lianlian.gzyunke.cn/api/v1/ai/training/records"),
+        )
+
+    monkeypatch.setattr(lianlian, "_get_training_records_request", fake_request)
+    result = await get_training_records_page(
+        start_date="20261101",
+        end_date="20261121",
+        page=1,
+        page_size=50,
+    )
+
+    assert result["response"]["records"][0]["id"] == "record-1"
+    assert result["response"]["hasMore"] is False
+    assert calls[0][0] == "test-token"
+    assert calls[0][1]["page"] == 1
+    assert calls[0][1]["page_size"] == 50
