@@ -55,6 +55,24 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempot
 
 
 @mcp.tool(
+    title="列出本人账号",
+    description="列出当前登录小米账号本人，可用于确认正在读取的账号。",
+    annotations=READ_ONLY,
+)
+async def list_family_members() -> list[dict]:
+    return await health_bridge.list_relatives()
+
+
+@mcp.tool(
+    title="读取本人健康摘要",
+    description="读取当前登录小米账号本人的最新健康快照和每日摘要。",
+    annotations=READ_ONLY,
+)
+async def get_health_snapshot(relative: str | None = None) -> dict:
+    return await health_bridge.snapshot(relative)
+
+
+@mcp.tool(
     title="读取本人健康历史",
     description="按日期读取当前登录小米账号本人的心率、睡眠、步数、血氧、卡路里等历史数据。",
     annotations=READ_ONLY,
