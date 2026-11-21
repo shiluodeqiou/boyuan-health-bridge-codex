@@ -343,7 +343,10 @@ class HealthBridge:
                 if metric == "weight":
                     try:
                         composition = await read_body_composition_history(
-                            client, selected_date.isoformat(), days=1
+                            client,
+                            selected_date.isoformat(),
+                            days=1,
+                            relative_uid=member.relative_uid,
                         )
                     except Exception:
                         composition = {"data": []}
@@ -441,6 +444,7 @@ class HealthBridge:
                 client,
                 parsed_date.isoformat() if parsed_date else None,
                 days=days,
+                relative_uid=member.relative_uid,
             )
             return {
                 "relative": member.model_dump(mode="json"),
@@ -464,8 +468,12 @@ class HealthBridge:
         days: int = 30,
     ) -> dict[str, Any]:
         """Read the full raw body-composition fields from Xiaomi weight records."""
+        member = (await self._get_relatives())[0]
         return await read_body_composition_history(
-            self._get_client(), query_date, days=days
+            self._get_client(),
+            query_date,
+            days=days,
+            relative_uid=member.relative_uid,
         )
 
     async def sport_records(
