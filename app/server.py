@@ -68,8 +68,11 @@ async def list_family_members() -> list[dict]:
     description="读取当前登录小米账号本人的最新健康快照和每日摘要。",
     annotations=READ_ONLY,
 )
-async def get_health_snapshot(relative: str | None = None) -> dict:
-    return await health_bridge.snapshot(relative)
+async def get_health_snapshot(
+    relative: str | None = None,
+    query_date: str | None = None,
+) -> dict:
+    return await health_bridge.snapshot(relative, query_date)
 
 
 @mcp.tool(
