@@ -87,7 +87,7 @@ def test_decodes_free_training_v3_samples() -> None:
     validity = bytes([0xCC, 0xCC])
     body = (
         struct.pack("<II", 2, START)
-        + b"\\x00"
+        + b"\x00"
         + bytes([138, 2, 97, 12, 145, 3, 96, 14])
     )
     plain = struct.pack("<IbBBB", START, 32, 3, 8, 0) + validity + body
@@ -109,7 +109,7 @@ def test_decodes_free_training_v3_samples() -> None:
 
 def test_decodes_free_training_v2_samples() -> None:
     validity = bytes([0xC0])
-    body = struct.pack("<II", 2, START) + b"\\x00" + bytes([120, 5, 125, 6])
+    body = struct.pack("<II", 2, START) + b"\x00" + bytes([120, 5, 125, 6])
     plain = struct.pack("<IbBBB", START, 32, 2, 8, 0) + validity + body
 
     samples, _ = _decode_record_file(plain, START, 32, 8)
