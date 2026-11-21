@@ -66,7 +66,7 @@ async def test_reads_raw_body_composition_fields_and_units() -> None:
         {"code": 0, "result": {"data_list": [_row("scale-row-1")], "has_more": False}}
     ])
 
-    result = await get_body_composition_history(client, "2026-11-21", days=1, relative_uid=42)
+    result = await get_body_composition_history(client, "2026-11-21", days=1)
 
     assert result["count"] == 1
     assert result["composition_available"] is True
@@ -89,9 +89,13 @@ async def test_reads_raw_body_composition_fields_and_units() -> None:
     assert method == "GET"
     assert path == "/app/v1/data/get_fitness_data_by_time"
     assert params["key"] == "weight"
-    assert params["relative_uid"] == 42
-    assert params["limit"] == 200
-    assert params["start_time"] < params["end_time"]
+    assert params["reverse"] is True
+    assert params["startTime"] < params["endTime"]
+    assert params["endTime"] - params["startTime"] == 86_400_000
+    assert "relative_uid" not in params
+    assert "limit" not in params
+    assert result["pages_fetched"] == 1
+    assert result["history_complete"] is True
 
 
 async def test_paginates_deduplicates_and_skips_deleted_scale_rows() -> None:
@@ -113,12 +117,15 @@ async def test_paginates_deduplicates_and_skips_deleted_scale_rows() -> None:
         },
     ])
 
-    result = await get_body_composition_history(client, "2026-11-21", days=1, relative_uid=42)
+    result = await get_body_composition_history(client, "2026-11-21", days=1)
 
     assert result["count"] == 2
     assert {row["body_fat_rate"] for row in result["data"]} == {21.3, 20.9}
     assert len(client.calls) == 2
     assert client.calls[1][2]["next_key"] == "cursor-1"
+    assert client.calls[1][2]["startTime"] == client.calls[0][2]["startTime"]
+    assert result["pages_fetched"] == 2
+    assert result["history_complete"] is True
 
 
 async def test_preserves_missing_composition_as_unavailable_not_zero() -> None:
@@ -132,7 +139,7 @@ async def test_preserves_missing_composition_as_unavailable_not_zero() -> None:
         {"code": 0, "result": {"data_list": [row], "has_more": False}}
     ])
 
-    result = await get_body_composition_history(client, "2026-11-21", days=1, relative_uid=42)
+    result = await get_body_composition_history(client, "2026-11-21", days=1)
 
     assert result["composition_available"] is False
     assert "body_fat_rate" not in result["data"][0]
