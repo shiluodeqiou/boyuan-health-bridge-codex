@@ -73,27 +73,35 @@ class Summary(BaseModel):
 
 
 class SnapshotClient:
-    async def get_relatives(self):
-        return [
-            Member(
-                relative_uid=42,
-                relative_note="小叶",
-                latest_data_time=1786557871,
-            )
-        ]
+    async def get_heart_rate(self, relative_uid, query_date, *, days):
+        return []
 
-    async def get_latest_data(self, relative_uid):
-        assert relative_uid == 42
-        return Snapshot(updated_time=1786557871)
+    async def get_sleep(self, relative_uid, query_date, *, days):
+        return []
 
-    async def get_daily_summary(self, relative_uid, query_date):
+    async def get_steps(self, relative_uid, query_date, *, days):
         assert relative_uid == 42
         assert query_date == date(2026, 8, 13)
-        return Summary(date=query_date.isoformat())
+        assert days == 1
+        return [Row(value=8000)]
 
-    async def get_shared_data_types(self, relative_uid):
-        assert relative_uid == 42
-        return ["heart_rate", "sleep"]
+    async def get_calories_history(self, relative_uid, query_date, *, days):
+        return []
+
+    async def get_spo2_history(self, relative_uid, query_date, *, days):
+        return []
+
+    async def get_intensity_history(self, relative_uid, query_date, *, days):
+        return []
+
+    async def get_valid_stand_history(self, relative_uid, query_date, *, days):
+        return []
+
+    async def get_weight_history(self, relative_uid, query_date, *, days):
+        return []
+
+    async def get_blood_pressure_history(self, relative_uid, query_date, *, days):
+        return []
 
 
 async def test_resolve_single_relative_and_history() -> None:
@@ -148,5 +156,7 @@ async def test_snapshot_bypasses_upstream_relative_lookup_and_uses_xiaomi_timezo
 
     result = await bridge.snapshot("小叶")
 
-    assert result["daily_summary"] == {"date": "2026-08-13"}
-    assert result["shared_data_types"] == ["heart_rate", "sleep"]
+    assert result["daily_summary"]["date"] == "2026-08-13"
+    assert result["daily_summary"]["steps"] == {"value": 8000}
+    assert result["available_data_types"] == ["steps"]
+    assert result["metrics"]["steps"] == [{"value": 8000}]
