@@ -12,7 +12,6 @@ from urllib.parse import urlsplit
 import httpx
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
-from mi_fitness.crypto import build_encrypted_params, decrypt_response
 
 SPORT_RECORDS_PATH = "/app/v1/data/get_sport_records_by_time"
 FDS_URL_PATH = "/healthapp/service/gen_download_url"
