@@ -41,10 +41,8 @@ setup_state = SetupState()
 
 mcp = MCPServer(
     "柏渊健康桥",
-    instructions=(
-        "读取小米运动健康中已由亲友主动共享的数据。所有工具均为只读。"
-        "健康数据可能有同步延迟，不能用于医疗诊断或紧急情况。"
-    ),
+    instructions=("读取当前登录小米账号本人的健康数据。所有工具均为只读。"
+                  "健康数据可能有同步延迟，不能用于医疗诊断或紧急情况。"),
     auth=AuthSettings(
         issuer_url=AnyHttpUrl(settings.public_base_url),
         resource_server_url=AnyHttpUrl(settings.mcp_url),
@@ -57,32 +55,8 @@ READ_ONLY = ToolAnnotations(read_only_hint=True, destructive_hint=False, idempot
 
 
 @mcp.tool(
-    title="列出健康共享亲友",
-    description="列出小米运动健康中已经向当前账号共享健康数据的亲友。",
-    annotations=READ_ONLY,
-)
-async def list_family_members() -> dict:
-    return {"members": await health_bridge.list_relatives()}
-
-
-@mcp.tool(
-    title="读取最近健康快照",
-    description=(
-        "读取一位亲友最近一次同步的健康快照、每日摘要和已共享的数据类型。"
-        "relative 可填写亲友备注名或 UID；只有一位亲友时可以省略。"
-    ),
-    annotations=READ_ONLY,
-)
-async def get_health_snapshot(relative: str | None = None) -> dict:
-    return await health_bridge.snapshot(relative)
-
-
-@mcp.tool(
-    title="读取健康历史",
-    description=(
-        "按日期读取亲友的健康历史。支持心率、睡眠、步数、卡路里、血氧、"
-        "中高强度活动、有效站立、体重和血压。日期格式为 YYYY-MM-DD，days 为 1 到 30。"
-    ),
+    title="读取本人健康历史",
+    description="按日期读取当前登录小米账号本人的心率、睡眠、步数、血氧、卡路里等历史数据。",
     annotations=READ_ONLY,
 )
 async def get_health_history(

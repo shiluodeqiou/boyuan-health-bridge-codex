@@ -5,7 +5,7 @@ from datetime import date, datetime, timedelta, timezone
 from typing import Any, Literal
 
 from mi_fitness import AuthToken, MiHealthClient, XiaomiAuth
-from mi_fitness.const import RELATIVES_LIST_PATH
+from mi_fitness.client import data as _data
 from pydantic import BaseModel, ConfigDict, ValidationError
 
 Metric = Literal[
@@ -41,6 +41,17 @@ _RELATIVE_UID_KEYS = (
     "uid",
 )
 _XIAOMI_TIMEZONE = timezone(timedelta(hours=8))
+
+
+def _configure_own_account_endpoints() -> None:
+    """Use Xiaomi's own-account data endpoints instead of family-sharing paths."""
+
+    _data.RELATIVES_AGGREGATED_DATA_PATH = "/app/v1/data/get_aggregated_fitness_data_by_time"
+    _data.RELATIVES_LATEST_DATA_PATH = "/app/v1/data/get_latest_fitness_data"
+    _data.RELATIVES_FITNESS_DATA_PATH = "/app/v1/data/get_fitness_data_by_time"
+
+
+_configure_own_account_endpoints()
 
 
 class RelativeMember(BaseModel):
@@ -245,7 +256,7 @@ class HealthBridge:
             "ok": True,
             "configured": self.configured,
             "xiaomi_user_id_suffix": user_id[-4:] if user_id else None,
-            "mode": "read_only_family_sharing",
+            "mode": "read_only_own_account",
         }
 
     def _get_client(self) -> MiHealthClient:
@@ -260,35 +271,11 @@ class HealthBridge:
         return self._client
 
     async def _get_relatives(self) -> list[Any]:
-        client = self._get_client()
-        members = await client.get_relatives()
-        if members:
-            return members
-
-        raw = await client._request("GET", RELATIVES_LIST_PATH)
-        members = _parse_relatives(raw)
-        if members:
-            return members
-
-        family_result: Any = []
-        family_error: str | None = None
-        try:
-            family_result = await client.get_family_members()
-            members = _parse_relatives(family_result)
-            if members:
-                return members
-        except Exception as exc:  # pragma: no cover - depends on Xiaomi endpoint behavior
-            family_error = type(exc).__name__
-
-        diagnostic = {
-            "relative_response": _safe_shape(raw),
-            "family_response": _safe_shape(family_result),
-            "family_error": family_error,
-        }
-        raise RuntimeError(
-            "小米接口已响应，但亲友数据结构无法识别。安全诊断："
-            + json.dumps(diagnostic, ensure_ascii=False, separators=(",", ":"))
-        )
+        token = AuthToken.model_validate_json(self._token_json)
+        own_uid = _coerce_int(token.user_id, default=None)
+        if own_uid is None:
+            raise RuntimeError("小米登录凭证中没有可用的账号 UID")
+        return [RelativeMember(relative_uid=own_uid, relative_note="本人")]
 
     async def list_relatives(self) -> list[dict[str, Any]]:
         members = await self._get_relatives()
@@ -323,10 +310,9 @@ class HealthBridge:
             else date.today()
         )
         summary = await client.get_daily_summary(member.relative_uid, query_date)
-        shared = await client.get_shared_data_types(member.relative_uid)
         return {
             "relative": member.model_dump(mode="json"),
-            "shared_data_types": shared,
+            "shared_data_types": None,
             "latest": snapshot.model_dump(mode="json"),
             "daily_summary": summary.model_dump(mode="json"),
             "notice": "数据来自小米运动健康最近一次亲友共享同步，不用于医疗诊断。",
