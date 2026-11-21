@@ -13,7 +13,7 @@ def client():
 def test_public_status_and_oauth_metadata(client: TestClient) -> None:
     status = client.get("/health")
     assert status.status_code == 200
-    assert status.json()["mode"] == "read_only_family_sharing"
+    assert status.json()["mode"] == "read_only_own_account"
 
     metadata = client.get("/.well-known/oauth-authorization-server")
     assert metadata.status_code == 200
