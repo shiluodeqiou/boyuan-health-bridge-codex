@@ -23,6 +23,7 @@ from app.fitness_sync import sync_xiaomi_to_database
 from app.health import HealthBridge, Metric
 from app.lianlian import connection_status as lianlian_connection_status
 from app.lianlian import get_skill_manifest as read_lianlian_skill_manifest
+from app.lianlian import get_training_records_page as read_lianlian_training_records_page
 from app.lianlian import validate_normalized_workouts
 from app.oauth import BridgeOAuthProvider, SignedTokens
 
@@ -175,6 +176,25 @@ async def get_lianlian_connection_status() -> dict:
 )
 async def get_lianlian_skill_manifest() -> dict:
     return await read_lianlian_skill_manifest()
+
+
+@mcp.tool(
+    title="读取练练健身训练记录原始分页",
+    description="只读调用练练健身官方 GET /api/v1/ai/training/records，按 yyyyMMdd 日期范围读取单页原始 JSON。每页最多 50 条。用于先核实官方实际返回字段，再开发标准化同步；不会写入或修改练练数据，也不会写入数据库。",
+    annotations=READ_ONLY,
+)
+async def get_lianlian_training_records_page(
+    start_date: str,
+    end_date: str,
+    page: int = 1,
+    page_size: int = 50,
+) -> dict:
+    return await read_lianlian_training_records_page(
+        start_date=start_date,
+        end_date=end_date,
+        page=page,
+        page_size=page_size,
+    )
 
 
 @mcp.tool(
