@@ -169,7 +169,7 @@ def _as_datetime(value: Any) -> datetime | None:
 
 
 def _record_time(row: dict[str, Any]) -> datetime | None:
-    for key in ("measured_at", "recorded_at", "start_time", "time", "timestamp", "date", "day"):
+    for key in ("measured_at", "recorded_at", "started_at", "start_time", "time", "timestamp", "date", "day"):
         value = _as_datetime(row.get(key))
         if value is not None:
             return value
