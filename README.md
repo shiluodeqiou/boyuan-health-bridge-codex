@@ -40,6 +40,37 @@
 - `get_sport_detail`：读取单次运动逐秒采样；目前覆盖自由训练/力量训练（proto 8，FDS v1–v5）、已验证的户外跑步/骑行格式，可返回心率及设备提供的其他采样指标；GPS 轨迹默认关闭。
 - `get_bridge_status`：检查桥接服务是否已配置，不返回任何密钥。
 
+## 统一个人健身数据库
+
+项目可将多个来源的数据写入 PostgreSQL，保留原始 JSON 以便以后扩展字段，并按来源 ID 幂等更新。
+
+### 数据模型
+
+- `fitness_body_measurements`：体重、BMI、体脂率、脂肪量、肌肉量、骨骼肌量及完整体脂秤原始字段。
+- `fitness_health_metrics`：心率、睡眠、步数、热量、血氧、活动强度、站立和血压等日常健康记录。
+- `fitness_workout_sessions`：小米有氧/运动摘要和练练健身力量训练会话。
+- `fitness_workout_samples`：小米运动逐秒采样。
+- `fitness_strength_exercises` / `fitness_strength_sets`：练练健身动作、组数、重量、次数和组间休息。
+- `fitness_sync_runs` / `fitness_sync_state`：同步历史、数据覆盖和最近成功时间。
+
+### 部署配置
+
+当前 Render 免费 Web Service 的本地文件系统不适合作为长期数据库，因此统一数据库使用外部 PostgreSQL（例如 Neon）。在 Render → Environment 配置：
+
+- `DATABASE_URL`：PostgreSQL 连接串。只放在 Render 环境变量，不要提交到 Git。
+- `LIANLIAN_API_TOKEN`：练练健身 AI skill 的 Bearer Token。只放在 Render 环境变量，不要发到聊天或提交到 Git。
+
+保存后 Render 会自动重新部署。首次调用同步工具时会自动创建所需表，不需要手动执行 SQL。
+
+### MCP 数据库工具
+
+- `sync_personal_fitness_data(days=30, include_sport_details=false)`：将小米本人最近 1–30 天的身体成分、日常健康指标和运动记录写入数据库；开启 `include_sport_details` 时额外读取支持格式的逐秒运动采样。
+- `get_fitness_database_summary(days=30)`：查看各来源记录数、最近同步结果和数据覆盖。
+- `get_lianlian_skill_manifest()`：安全读取练练健身当前返回的技能/API说明，不返回 Token。
+- `ingest_lianlian_workouts(records)`：接收已标准化的练练健身训练记录，写入训练会话、动作和组数据。
+
+练练健身自动读取适配器必须先依据 `get_lianlian_skill_manifest` 返回的当前文档确认端点和字段，不猜测未公开的 API。标准导入结构为：训练记录包含 `id`、`started_at`、`exercises`；每个动作包含 `name`、`sets`；每组可包含 `weight_kg`、`reps`、`duration_seconds`、`rest_seconds`。完整原始记录会保留在 `raw_data`。
+
 ## 本地开发
 
 ```bash
