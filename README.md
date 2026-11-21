@@ -1,6 +1,6 @@
 # 柏渊健康桥
 
-把小米运动健康的「亲友共享」数据，以只读 MCP 工具连接到 ChatGPT。
+把当前登录的小米运动健康账号本人的数据，以只读 MCP 工具连接到 ChatGPT。
 
 项目不会把小米凭证或健康数据写进 Git。远程 MCP 使用 OAuth 2.1、PKCE 和短时访问令牌保护，所有健康工具均为只读。
 
@@ -30,8 +30,8 @@
 
 ## 提供的只读工具
 
-- `list_family_members`：列出已经共享健康数据的亲友。
-- `get_health_snapshot`：读取最近一次同步的健康快照和每日摘要。
+- `list_family_members`：确认当前登录的小米账号本人。
+- `get_health_snapshot`：读取本人最新健康快照和每日摘要。
 - `get_health_history`：按日期读取心率、睡眠、步数、血氧、卡路里等历史数据。
 - `get_bridge_status`：检查桥接服务是否已配置，不返回任何密钥。
 
