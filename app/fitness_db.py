@@ -1172,7 +1172,72 @@ class FitnessDatabase:
         if not 1 <= days <= 3650:
             raise ValueError("days 必须在 1 到 3650 之间")
         if not include_details:
-            return await self.fat_loss_summary(days)
+            summary = await self.fat_loss_summary(days)
+            since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
+            async with await self._connect() as conn:
+                async with conn.cursor() as cur:
+                    await cur.execute(
+                        """SELECT
+                               count(*) FILTER (WHERE steps IS NOT NULL) AS step_days,
+                               round(avg(steps)::numeric, 1)::double precision AS average_steps,
+                               COALESCE(sum(steps), 0) AS total_steps,
+                               count(*) FILTER (WHERE sleep_minutes IS NOT NULL) AS sleep_days,
+                               round(avg(sleep_minutes)::numeric, 1)::double precision AS average_sleep_minutes,
+                               count(*) FILTER (WHERE resting_heart_rate_bpm IS NOT NULL) AS resting_hr_days,
+                               round(avg(resting_heart_rate_bpm)::numeric, 1)::double precision
+                                   AS average_resting_heart_rate_bpm
+                           FROM fitness_daily_overview
+                           WHERE day >= %s""",
+                        (since_date,),
+                    )
+                    daily = await cur.fetchone()
+                    await cur.execute(
+                        """SELECT
+                               count(*) FILTER (WHERE source='xiaomi' AND modality='cardio')
+                                   AS cardio_sessions,
+                               COALESCE(sum(duration_seconds) FILTER (
+                                   WHERE source='xiaomi' AND modality='cardio'), 0)
+                                   AS cardio_duration_seconds,
+                               COALESCE(sum(COALESCE(active_calories_kcal,
+                                                     total_calories_kcal, calories_kcal))
+                                   FILTER (WHERE source='xiaomi' AND modality='cardio'), 0)
+                                   AS cardio_calories_kcal,
+                               count(*) FILTER (WHERE source='lianlian') AS strength_sessions,
+                               COALESCE(sum(duration_seconds) FILTER (
+                                   WHERE source='lianlian'), 0) AS strength_duration_seconds
+                           FROM fitness_workout_sessions
+                           WHERE COALESCE(session_date,
+                                          (started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s""",
+                        (since_date,),
+                    )
+                    workouts = await cur.fetchone()
+            summary["activity_recovery"] = {
+                "daily_health": {
+                    "step_days": daily[0] or 0,
+                    "average_steps": float(daily[1]) if daily[1] is not None else None,
+                    "total_steps": daily[2] or 0,
+                    "sleep_days": daily[3] or 0,
+                    "average_sleep_minutes": (
+                        float(daily[4]) if daily[4] is not None else None
+                    ),
+                    "resting_heart_rate_days": daily[5] or 0,
+                    "average_resting_heart_rate_bpm": (
+                        float(daily[6]) if daily[6] is not None else None
+                    ),
+                },
+                "training_activity": {
+                    "cardio_sessions": workouts[0] or 0,
+                    "cardio_duration_minutes": round((workouts[1] or 0) / 60, 1),
+                    "cardio_calories_kcal": float(workouts[2] or 0),
+                    "strength_sessions": workouts[3] or 0,
+                    "strength_duration_minutes": round((workouts[4] or 0) / 60, 1),
+                },
+            }
+            summary["notes"].append(
+                "综合仪表盘额外提供日常步数、睡眠、静息心率和训练活动汇总；"
+                "专门的减脂摘要仍由 get_fat_loss_summary 返回。"
+            )
+            return summary
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
         async with await self._connect() as conn:
@@ -1658,5 +1723,193 @@ class FitnessDatabase:
                 "缺失字段保留为缺失，不会按 0 参与统计。",
                 "未知完成状态与明确未完成状态分开报告。",
                 "逐秒运动采样尚未同步时，不能据此计算完整的运动心率区间分布。",
+            ],
+        }
+
+
+    async def strength_progression(
+        self,
+        exercise_name: str,
+        days: int = 90,
+    ) -> dict[str, Any]:
+        """Return per-session progress for one exact exercise name."""
+        if not 1 <= days <= 3650:
+            raise ValueError("days 必须在 1 到 3650 之间")
+        exercise_name = exercise_name.strip()
+        if not exercise_name or len(exercise_name) > 120:
+            raise ValueError("exercise_name 不能为空且不能超过 120 个字符")
+        await self.initialize()
+        since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT session_date, exercise_name, set_count,
+                              completed_set_count, total_reps, volume_kg,
+                              max_weight_kg, best_estimated_1rm_kg,
+                              unknown_set_count, incomplete_set_count
+                       FROM fitness_strength_progression
+                       WHERE session_date >= %s AND exercise_name = %s
+                       ORDER BY session_date
+                       LIMIT 500""",
+                    (since_date, exercise_name),
+                )
+                rows = await cur.fetchall()
+                columns = [column.name for column in cur.description]
+                series = [
+                    {
+                        key: (value.isoformat() if isinstance(value, (date, datetime)) else value)
+                        for key, value in zip(columns, row, strict=True)
+                    }
+                    for row in rows
+                ]
+                if not series:
+                    await cur.execute(
+                        """SELECT DISTINCT exercise_name
+                           FROM fitness_strength_exercises
+                           WHERE source='lianlian' AND exercise_name ILIKE %s
+                           ORDER BY exercise_name LIMIT 20""",
+                        (f"%{exercise_name}%",),
+                    )
+                    suggestions = [row[0] for row in await cur.fetchall()]
+                else:
+                    suggestions = []
+
+        valid_1rm = [
+            row["best_estimated_1rm_kg"]
+            for row in series
+            if row["best_estimated_1rm_kg"] is not None
+        ]
+        return {
+            "database": "postgresql",
+            "exercise_name": exercise_name,
+            "window_days": days,
+            "since_date": since_date.isoformat(),
+            "sessions": series,
+            "summary": {
+                "sessions": len(series),
+                "completed_sets": sum(row["completed_set_count"] or 0 for row in series),
+                "unknown_sets": sum(row["unknown_set_count"] or 0 for row in series),
+                "incomplete_sets": sum(row["incomplete_set_count"] or 0 for row in series),
+                "total_reps": sum(row["total_reps"] or 0 for row in series),
+                "total_volume_kg": round(
+                    sum(row["volume_kg"] or 0 for row in series), 2
+                ),
+                "best_estimated_1rm_kg": max(valid_1rm) if valid_1rm else None,
+                "first_estimated_1rm_kg": valid_1rm[0] if valid_1rm else None,
+                "latest_estimated_1rm_kg": valid_1rm[-1] if valid_1rm else None,
+                "estimated_1rm_change_kg": (
+                    round(valid_1rm[-1] - valid_1rm[0], 2)
+                    if len(valid_1rm) >= 2 else None
+                ),
+            },
+            "suggestions": suggestions,
+            "notes": [
+                "只统计明确标记为完成的组；未知和未完成组单独报告。",
+                "外部负重容量只统计明确以 kg 记录且有次数的完成组。",
+                "Epley 估算 1RM 仅用于趋势参考，不是实测最大重量。",
+                "同名但不同器械的动作暂未自动合并或区分。",
+            ],
+        }
+
+    async def cardio_analysis(self, days: int = 30) -> dict[str, Any]:
+        """Summarize Xiaomi cardio sessions and indicate whether samples exist."""
+        if not 1 <= days <= 3650:
+            raise ValueError("days 必须在 1 到 3650 之间")
+        await self.initialize()
+        until_date = datetime.now(CN_TZ).date()
+        since_date = until_date - timedelta(days=days - 1)
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT COALESCE(session_date,
+                                       (started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
+                              sport_name, started_at, duration_seconds,
+                              COALESCE(active_calories_kcal,
+                                       total_calories_kcal, calories_kcal) AS calories_kcal,
+                              average_heart_rate_bpm, maximum_heart_rate_bpm
+                       FROM fitness_workout_sessions
+                       WHERE source='xiaomi' AND modality='cardio'
+                         AND COALESCE(session_date,
+                                      (started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s
+                       ORDER BY day, started_at
+                       LIMIT 1000""",
+                    (since_date,),
+                )
+                rows = await cur.fetchall()
+                sessions = [
+                    {
+                        "date": row[0].isoformat() if row[0] else None,
+                        "sport_name": row[1],
+                        "started_at": row[2].isoformat() if row[2] else None,
+                        "duration_seconds": row[3],
+                        "calories_kcal": float(row[4]) if row[4] is not None else None,
+                        "average_heart_rate_bpm": row[5],
+                        "maximum_heart_rate_bpm": row[6],
+                    }
+                    for row in rows
+                ]
+                await cur.execute(
+                    """SELECT count(*)
+                       FROM fitness_workout_samples ws
+                       JOIN fitness_workout_sessions s
+                         ON s.source=ws.source AND s.external_id=ws.external_id
+                       WHERE s.source='xiaomi' AND s.modality='cardio'
+                         AND COALESCE(s.session_date,
+                                      (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s""",
+                    (since_date,),
+                )
+                sample_count = (await cur.fetchone())[0]
+
+        by_sport: dict[str, dict[str, Any]] = {}
+        for session in sessions:
+            name = session["sport_name"] or "未分类运动"
+            group = by_sport.setdefault(
+                name,
+                {
+                    "sessions": 0,
+                    "duration_seconds": 0,
+                    "calories_kcal": 0.0,
+                    "average_heart_rates": [],
+                    "maximum_heart_rate_bpm": None,
+                },
+            )
+            group["sessions"] += 1
+            group["duration_seconds"] += session["duration_seconds"] or 0
+            group["calories_kcal"] += session["calories_kcal"] or 0.0
+            if session["average_heart_rate_bpm"] is not None:
+                group["average_heart_rates"].append(session["average_heart_rate_bpm"])
+            if session["maximum_heart_rate_bpm"] is not None:
+                current = group["maximum_heart_rate_bpm"]
+                group["maximum_heart_rate_bpm"] = max(
+                    current or 0, session["maximum_heart_rate_bpm"]
+                )
+
+        for group in by_sport.values():
+            heart_rates = group.pop("average_heart_rates")
+            group["duration_minutes"] = round(group["duration_seconds"] / 60, 1)
+            group["calories_kcal"] = round(group["calories_kcal"], 1)
+            group["average_session_heart_rate_bpm"] = (
+                round(sum(heart_rates) / len(heart_rates), 1) if heart_rates else None
+            )
+
+        return {
+            "database": "postgresql",
+            "window_days": days,
+            "since_date": since_date.isoformat(),
+            "until_date": until_date.isoformat(),
+            "session_count": len(sessions),
+            "total_duration_minutes": round(
+                sum(session["duration_seconds"] or 0 for session in sessions) / 60, 1
+            ),
+            "total_calories_kcal": round(
+                sum(session["calories_kcal"] or 0 for session in sessions), 1
+            ),
+            "by_sport": by_sport,
+            "sessions": sessions,
+            "sample_count": sample_count,
+            "heart_rate_zone_analysis_available": sample_count > 0,
+            "notes": [
+                "热量优先使用设备提供的活动热量；缺失时才回退到总热量或会话热量。",
+                "当前没有逐秒采样时，只能比较单次平均/最高心率，不能计算完整心率区间分布。",
             ],
         }
