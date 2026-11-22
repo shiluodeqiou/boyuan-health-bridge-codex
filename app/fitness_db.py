@@ -1007,6 +1007,7 @@ class FitnessDatabase:
                             "workout_sessions": workout_written,
                             "health_metric_rows": metric_written,
                             "workout_samples": sample_written,
+                            "sport_record_notes": sport_records.get("notes", []),
                             "health_metric_errors": [
                                 key for key, rows in health_metrics.items()
                                 if not isinstance(rows, list)
