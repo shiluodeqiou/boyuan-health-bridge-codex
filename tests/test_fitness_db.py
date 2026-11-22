@@ -198,7 +198,7 @@ def test_workout_sample_rows_prepare_batch_and_preserve_sample_data() -> None:
 
     assert len(rows) == 2
     assert rows[0][0:3] == ("xiaomi", "1795314930", 0)
-    assert rows[0][3] == datetime.fromtimestamp(1_795_314_930, timezone.utc)
+    assert rows[0][3] == datetime.fromtimestamp(1_795_314_930, UTC)
     assert rows[0][4] == 145.0
     assert rows[0][5].obj == sample
     assert rows[1][2] == 2
