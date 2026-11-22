@@ -285,6 +285,22 @@ def test_upserts_skip_unchanged_rows_and_keepstrong_writes_are_batched() -> None
 
 @pytest.mark.asyncio
 @pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="requires PostgreSQL integration database")
+async def test_schema_initialization_is_safe_across_database_instances() -> None:
+    first = FitnessDatabase()
+    second = FitnessDatabase()
+    try:
+        await asyncio.gather(first.initialize(), second.initialize())
+        async with first._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT version FROM fitness_schema_migrations ORDER BY version"
+            )
+            assert [row[0] for row in await cursor.fetchall()] == [1]
+    finally:
+        await asyncio.gather(first.close(), second.close())
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="requires PostgreSQL integration database")
 async def test_batched_sync_writes_are_idempotent() -> None:
     database = FitnessDatabase()
     workout_time = 1_795_314_930
@@ -328,6 +344,16 @@ async def test_batched_sync_writes_are_idempotent() -> None:
     try:
         first_xiaomi = await database.store_xiaomi(**xiaomi_payload)
         second_xiaomi = await database.store_xiaomi(**xiaomi_payload)
+        changed_body = {
+            **xiaomi_payload["body_composition"],
+            "data": [{
+                **xiaomi_payload["body_composition"]["data"][0],
+                "weight": 74.8,
+            }],
+        }
+        changed_xiaomi = await database.store_xiaomi(
+            **{**xiaomi_payload, "body_composition": changed_body}
+        )
 
         assert first_xiaomi["body_measurements_upserted"] == 1
         assert first_xiaomi["workout_sessions_upserted"] == 1
@@ -337,6 +363,10 @@ async def test_batched_sync_writes_are_idempotent() -> None:
         assert second_xiaomi["workout_sessions_upserted"] == 0
         assert second_xiaomi["health_metric_rows_upserted"] == 0
         assert second_xiaomi["workout_samples_upserted"] == 0
+        assert changed_xiaomi["body_measurements_upserted"] == 1
+        assert changed_xiaomi["workout_sessions_upserted"] == 0
+        assert changed_xiaomi["health_metric_rows_upserted"] == 0
+        assert changed_xiaomi["workout_samples_upserted"] == 0
 
         keepstrong_payload = [{
             "id": "normal:test-session",
@@ -387,6 +417,11 @@ async def test_batched_sync_writes_are_idempotent() -> None:
                      (SELECT count(*) FROM fitness_strength_sets WHERE source='lianlian')"""
             )
             assert await counts.fetchone() == (1, 1, 1, 1, 1, 1, 1)
+            updated_weight = await conn.execute(
+                """SELECT weight_kg FROM fitness_body_measurements
+                   WHERE source='xiaomi' AND source_record_id='body-test-1'"""
+            )
+            assert (await updated_weight.fetchone())[0] == pytest.approx(74.8)
             run_counts = await conn.execute(
                 """SELECT source, records_written FROM fitness_sync_runs
                    WHERE id IN (%s, %s)
