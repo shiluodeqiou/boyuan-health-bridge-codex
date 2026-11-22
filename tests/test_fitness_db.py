@@ -6,6 +6,7 @@ import inspect
 import pytest
 
 from app.fitness_db import (
+    SCHEMA_MIGRATIONS,
     SCHEMA_SQL,
     FitnessDatabase,
     _as_date,
@@ -255,3 +256,27 @@ def test_workout_session_schema_persists_device_heart_rate_zones() -> None:
         "hrm_extreme_duration_seconds",
     ):
         assert column in SCHEMA_SQL
+
+
+def test_schema_migrations_are_versioned_and_serialized() -> None:
+    versions = [version for version, _ in SCHEMA_MIGRATIONS]
+    assert versions == sorted(set(versions))
+    assert versions and versions[0] == 1
+    source = inspect.getsource(FitnessDatabase.initialize)
+    assert "fitness_schema_migrations" in source
+    assert "pg_advisory_xact_lock" in source
+
+
+def test_database_pool_is_bounded_and_reused() -> None:
+    source = inspect.getsource(FitnessDatabase._connect)
+    assert "AsyncConnectionPool" in source
+    assert "max_size=4" in source
+    assert "self._pool.connection()" in source
+
+
+def test_upserts_skip_unchanged_rows_and_keepstrong_writes_are_batched() -> None:
+    xiaomi = inspect.getsource(FitnessDatabase.store_xiaomi)
+    keepstrong = inspect.getsource(FitnessDatabase.store_lianlian)
+    assert xiaomi.count("IS DISTINCT FROM") >= 4
+    assert keepstrong.count("cursor.executemany") >= 5
+    assert keepstrong.count("IS DISTINCT FROM") >= 3
