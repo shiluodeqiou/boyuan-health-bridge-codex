@@ -1942,8 +1942,12 @@ class FitnessDatabase:
                         zone: row[index]
                         for index, zone in enumerate(zone_fields, start=7)
                     }
-                    zone_total = sum(
-                        value for value in zone_durations.values() if value is not None
+                    has_zone_data = any(
+                        value is not None for value in zone_durations.values()
+                    )
+                    zone_total = (
+                        sum(value for value in zone_durations.values() if value is not None)
+                        if has_zone_data else None
                     )
                     sessions.append({
                         "date": row[0].isoformat() if row[0] else None,
@@ -1954,7 +1958,7 @@ class FitnessDatabase:
                         "average_heart_rate_bpm": row[5],
                         "maximum_heart_rate_bpm": row[6],
                         "heart_rate_zone_durations_seconds": zone_durations,
-                        "heart_rate_zone_total_seconds": zone_total or None,
+                        "heart_rate_zone_total_seconds": zone_total,
                         "heart_rate_zone_percentages": {
                             zone: (
                                 round(value * 100 / zone_total, 1)
@@ -1990,6 +1994,9 @@ class FitnessDatabase:
                     "heart_rate_zone_durations_seconds": {
                         zone: 0 for zone in zone_fields
                     },
+                    "heart_rate_zone_value_counts": {
+                        zone: 0 for zone in zone_fields
+                    },
                     "sessions_with_zone_data": 0,
                 },
             )
@@ -2008,6 +2015,7 @@ class FitnessDatabase:
                 for zone, seconds in session["heart_rate_zone_durations_seconds"].items():
                     if seconds is not None:
                         group["heart_rate_zone_durations_seconds"][zone] += seconds
+                        group["heart_rate_zone_value_counts"][zone] += 1
 
         for group in by_sport.values():
             heart_rates = group.pop("average_heart_rates")
@@ -2017,13 +2025,19 @@ class FitnessDatabase:
                 round(sum(heart_rates) / len(heart_rates), 1) if heart_rates else None
             )
             group["heart_rate_zone_durations_minutes"] = {
-                zone: round(seconds / 60, 1)
+                zone: (
+                    round(seconds / 60, 1)
+                    if group["heart_rate_zone_value_counts"][zone] else None
+                )
                 for zone, seconds in group["heart_rate_zone_durations_seconds"].items()
             }
             group["heart_rate_zone_durations_seconds"] = {
-                zone: seconds if group["sessions_with_zone_data"] else None
+                zone: (
+                    seconds if group["heart_rate_zone_value_counts"][zone] else None
+                )
                 for zone, seconds in group["heart_rate_zone_durations_seconds"].items()
             }
+            group.pop("heart_rate_zone_value_counts")
 
         zone_sessions = [
             session for session in sessions
