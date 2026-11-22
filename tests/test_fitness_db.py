@@ -131,3 +131,22 @@ def test_segmental_trends_support_lower_limb_not_thigh_alias() -> None:
         smoothing_window=1,
     )
     assert trends["left_lower_limb"]["last"]["value_kg"] == 4.1
+
+
+
+@pytest.mark.asyncio
+async def test_segmental_trends_reject_invalid_metric_before_database_access() -> None:
+    with pytest.raises(ValueError, match="metric"):
+        await FitnessDatabase().segmental_body_trends(metric="thigh")
+
+
+@pytest.mark.asyncio
+async def test_segmental_trends_reject_invalid_part_before_database_access() -> None:
+    with pytest.raises(ValueError, match="parts"):
+        await FitnessDatabase().segmental_body_trends(parts=["thigh"])
+
+
+@pytest.mark.asyncio
+async def test_segmental_trends_reject_invalid_smoothing_window_before_database_access() -> None:
+    with pytest.raises(ValueError, match="smoothing_window"):
+        await FitnessDatabase().segmental_body_trends(smoothing_window=0)
