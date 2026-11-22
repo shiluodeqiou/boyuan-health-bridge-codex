@@ -1344,3 +1344,319 @@ class FitnessDatabase:
             "health_metric_counts": metric_counts,
             "recent_sync_runs": runs,
         }
+
+
+    @staticmethod
+    def _build_segmental_trends(
+        rows: list[dict[str, Any]],
+        *,
+        metric: str,
+        parts: list[str],
+        smoothing_window: int,
+    ) -> dict[str, Any]:
+        """Build per-part trends from daily-last body-composition records."""
+        labels = {
+            "trunk": "躯干",
+            "left_upper_limb": "左上肢",
+            "right_upper_limb": "右上肢",
+            "left_lower_limb": "左下肢",
+            "right_lower_limb": "右下肢",
+        }
+        suffix = {"fat_mass": "fat_mass", "muscle_mass": "muscle_mass"}[metric]
+        result: dict[str, Any] = {}
+        for part in parts:
+            key = f"{part}_{suffix}"
+            points: list[dict[str, Any]] = []
+            for row in rows:
+                metrics = row.get("segmental_metrics")
+                value = _float_or_none(metrics.get(key)) if isinstance(metrics, dict) else None
+                if value is None:
+                    continue
+                measured_date = row.get("measured_date")
+                date_text = (
+                    measured_date.isoformat()
+                    if isinstance(measured_date, (date, datetime))
+                    else str(measured_date)
+                )
+                points.append({"date": date_text, "value_kg": round(value, 3)})
+
+            for index, point in enumerate(points):
+                window = points[max(0, index - smoothing_window + 1):index + 1]
+                point["moving_average_kg"] = round(
+                    sum(item["value_kg"] for item in window) / len(window), 3
+                )
+
+            first = points[0] if points else None
+            last = points[-1] if points else None
+            change = (
+                round(last["value_kg"] - first["value_kg"], 3)
+                if first is not None and last is not None else None
+            )
+            elapsed_days = (
+                (date.fromisoformat(last["date"]) - date.fromisoformat(first["date"])).days
+                if first is not None and last is not None else 0
+            )
+            result[part] = {
+                "label": labels[part],
+                "measurement_count": len(points),
+                "first": first,
+                "last": last,
+                "change_kg": change,
+                "weekly_change_kg": (
+                    round(change * 7 / elapsed_days, 3)
+                    if change is not None and elapsed_days > 0 else None
+                ),
+                "series": points,
+            }
+        return result
+
+    async def segmental_body_trends(
+        self,
+        days: int = 30,
+        metric: str = "fat_mass",
+        parts: list[str] | None = None,
+        smoothing_window: int = 7,
+    ) -> dict[str, Any]:
+        """Return daily-last segmental fat or muscle trends without raw source JSON."""
+        if not 1 <= days <= 3650:
+            raise ValueError("days 必须在 1 到 3650 之间")
+        if metric not in {"fat_mass", "muscle_mass"}:
+            raise ValueError("metric 只能是 fat_mass 或 muscle_mass")
+        if not 1 <= smoothing_window <= 30:
+            raise ValueError("smoothing_window 必须在 1 到 30 之间")
+        available_parts = (
+            "trunk",
+            "left_upper_limb",
+            "right_upper_limb",
+            "left_lower_limb",
+            "right_lower_limb",
+        )
+        selected_parts = list(available_parts) if parts is None else parts
+        if not selected_parts or any(part not in available_parts for part in selected_parts):
+            raise ValueError(f"parts 必须是以下部位的非空子集：{', '.join(available_parts)}")
+
+        await self.initialize()
+        until_date = datetime.now(CN_TZ).date()
+        since_date = until_date - timedelta(days=days - 1)
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT measured_date, measured_at, segmental_metrics
+                       FROM (
+                           SELECT DISTINCT ON (measured_date)
+                               measured_date, measured_at, segmental_metrics
+                           FROM fitness_body_measurements
+                           WHERE source='xiaomi' AND measured_date >= %s
+                           ORDER BY measured_date, measured_at DESC
+                       ) daily
+                       ORDER BY measured_date""",
+                    (since_date,),
+                )
+                raw_rows = await cur.fetchall()
+                rows = [
+                    {
+                        "measured_date": row[0],
+                        "measured_at": row[1],
+                        "segmental_metrics": row[2] or {},
+                    }
+                    for row in raw_rows
+                ]
+
+        series = self._build_segmental_trends(
+            rows,
+            metric=metric,
+            parts=selected_parts,
+            smoothing_window=smoothing_window,
+        )
+        return {
+            "database": "postgresql",
+            "window_days": days,
+            "since_date": since_date.isoformat(),
+            "until_date": until_date.isoformat(),
+            "metric": metric,
+            "unit": "kg",
+            "aggregation": "daily_last",
+            "smoothing_window": smoothing_window,
+            "measurement_days": len(rows),
+            "segmental_measurement_days": sum(
+                1 for row in rows if row["segmental_metrics"]
+            ),
+            "parts": series,
+            "notes": [
+                "每个自然日只取当天最后一次体脂秤测量。",
+                "移动平均按最近 N 次有效测量计算，不会把缺失日期补成 0。",
+                "小米提供的是左右下肢整体数据，不代表独立大腿脂肪量。",
+            ],
+        }
+
+    async def sync_status(self) -> dict[str, Any]:
+        """Return last successful sync, latest attempt and recent run outcomes."""
+        await self.initialize()
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT s.source, s.resource, s.last_success_at, s.latest_record_at,
+                              s.records_seen, r.status, r.started_at, r.finished_at,
+                              r.records_seen, r.records_written, r.error_type, r.details
+                       FROM fitness_sync_state s
+                       LEFT JOIN LATERAL (
+                           SELECT status, started_at, finished_at, records_seen,
+                                  records_written, error_type, details
+                           FROM fitness_sync_runs
+                           WHERE source=s.source AND resource=s.resource
+                           ORDER BY id DESC LIMIT 1
+                       ) r ON TRUE
+                       ORDER BY s.source, s.resource"""
+                )
+                state_rows = await cur.fetchall()
+                states = [
+                    {
+                        "source": row[0],
+                        "resource": row[1],
+                        "last_success_at": row[2].isoformat() if row[2] else None,
+                        "latest_record_at": row[3].isoformat() if row[3] else None,
+                        "records_seen_in_last_success": row[4],
+                        "last_attempt_status": row[5],
+                        "last_attempt_started_at": row[6].isoformat() if row[6] else None,
+                        "last_attempt_finished_at": row[7].isoformat() if row[7] else None,
+                        "last_attempt_records_seen": row[8],
+                        "last_attempt_records_written": row[9],
+                        "last_attempt_error_type": row[10],
+                        "last_attempt_details": row[11] or {},
+                    }
+                    for row in state_rows
+                ]
+                await cur.execute(
+                    """SELECT source, resource, status, started_at, finished_at,
+                              records_seen, records_written, error_type, details
+                       FROM fitness_sync_runs
+                       ORDER BY id DESC LIMIT 10"""
+                )
+                recent_rows = await cur.fetchall()
+                recent_runs = [
+                    {
+                        "source": row[0],
+                        "resource": row[1],
+                        "status": row[2],
+                        "started_at": row[3].isoformat() if row[3] else None,
+                        "finished_at": row[4].isoformat() if row[4] else None,
+                        "records_seen": row[5],
+                        "records_written": row[6],
+                        "error_type": row[7],
+                        "details": row[8] or {},
+                    }
+                    for row in recent_rows
+                ]
+        return {"database": "postgresql", "resources": states, "recent_runs": recent_runs}
+
+    async def data_quality_report(self, days: int = 30) -> dict[str, Any]:
+        """Summarize data coverage and completion-state quality without raw payloads."""
+        if not 1 <= days <= 3650:
+            raise ValueError("days 必须在 1 到 3650 之间")
+        await self.initialize()
+        until_date = datetime.now(CN_TZ).date()
+        since_date = until_date - timedelta(days=days - 1)
+        async with await self._connect() as conn:
+            async with conn.cursor() as cur:
+                await cur.execute(
+                    """SELECT count(*) AS records,
+                              count(*) FILTER (WHERE segmental_metrics <> '{}'::jsonb)
+                                  AS segmental_records,
+                              count(*) FILTER (WHERE weight_kg IS NULL) AS missing_weight,
+                              count(*) FILTER (WHERE body_fat_rate IS NULL) AS missing_body_fat_rate,
+                              count(*) FILTER (WHERE fat_mass_kg IS NULL) AS missing_fat_mass,
+                              count(*) FILTER (WHERE muscle_mass_kg IS NULL) AS missing_muscle_mass
+                       FROM fitness_body_measurements
+                       WHERE source='xiaomi' AND measured_date >= %s""",
+                    (since_date,),
+                )
+                body = await cur.fetchone()
+                await cur.execute(
+                    """SELECT count(*) AS recorded_sets,
+                              count(*) FILTER (WHERE st.is_completed IS TRUE) AS completed_sets,
+                              count(*) FILTER (WHERE st.is_completed IS NULL) AS unknown_sets,
+                              count(*) FILTER (WHERE st.is_completed IS FALSE) AS incomplete_sets,
+                              count(*) FILTER (
+                                  WHERE st.is_completed IS TRUE
+                                    AND st.weight_kg IS NOT NULL AND st.reps IS NOT NULL
+                              ) AS completed_external_load_sets
+                       FROM fitness_workout_sessions s
+                       JOIN fitness_strength_exercises e
+                         ON e.source=s.source AND e.external_id=s.external_id
+                       JOIN fitness_strength_sets st
+                         ON st.source=e.source AND st.external_id=e.external_id
+                        AND st.exercise_index=e.exercise_index
+                       WHERE s.source='lianlian'
+                         AND COALESCE(s.session_date,
+                                      (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s""",
+                    (since_date,),
+                )
+                strength = await cur.fetchone()
+                await cur.execute(
+                    """SELECT metric, count(*) AS records
+                       FROM fitness_health_metrics
+                       WHERE source='xiaomi' AND recorded_date >= %s
+                       GROUP BY metric ORDER BY metric""",
+                    (since_date,),
+                )
+                health_metrics = [
+                    {"metric": row[0], "records": row[1]}
+                    for row in await cur.fetchall()
+                ]
+                await cur.execute(
+                    """SELECT count(*)
+                       FROM fitness_workout_samples ws
+                       JOIN fitness_workout_sessions s
+                         ON s.source=ws.source AND s.external_id=ws.external_id
+                       WHERE s.source='xiaomi'
+                         AND COALESCE(s.session_date,
+                                      (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s""",
+                    (since_date,),
+                )
+                sample_count = (await cur.fetchone())[0]
+
+        sync = await self.sync_status()
+        body_count = body[0] or 0
+        segmental_count = body[1] or 0
+        recorded_sets = strength[0] or 0
+        completed_sets = strength[1] or 0
+        unknown_sets = strength[2] or 0
+        incomplete_sets = strength[3] or 0
+        return {
+            "database": "postgresql",
+            "window_days": days,
+            "since_date": since_date.isoformat(),
+            "until_date": until_date.isoformat(),
+            "body_composition": {
+                "records": body_count,
+                "with_segmental_metrics": segmental_count,
+                "segmental_coverage_percent": (
+                    round(segmental_count * 100 / body_count, 1) if body_count else None
+                ),
+                "missing_weight": body[2] or 0,
+                "missing_body_fat_rate": body[3] or 0,
+                "missing_fat_mass": body[4] or 0,
+                "missing_muscle_mass": body[5] or 0,
+            },
+            "strength_sets": {
+                "recorded": recorded_sets,
+                "completed": completed_sets,
+                "unknown_completion": unknown_sets,
+                "incomplete": incomplete_sets,
+                "completed_percent": (
+                    round(completed_sets * 100 / recorded_sets, 1) if recorded_sets else None
+                ),
+                "completed_external_load_sets": strength[4] or 0,
+            },
+            "health_metrics": health_metrics,
+            "workout_samples": {
+                "records": sample_count,
+                "available_for_heart_rate_zone_analysis": sample_count > 0,
+            },
+            "sync": sync,
+            "notes": [
+                "缺失字段保留为缺失，不会按 0 参与统计。",
+                "未知完成状态与明确未完成状态分开报告。",
+                "逐秒运动采样尚未同步时，不能据此计算完整的运动心率区间分布。",
+            ],
+        }
