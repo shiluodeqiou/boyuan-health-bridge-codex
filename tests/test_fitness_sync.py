@@ -9,8 +9,8 @@ from app.fitness_sync import (
     _duration_seconds,
     fetch_all_lianlian_records,
     normalize_lianlian_record,
-    sync_xiaomi_to_database,
     sync_unified_fitness_data,
+    sync_xiaomi_to_database,
 )
 
 
