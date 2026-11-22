@@ -1204,7 +1204,8 @@ class FitnessDatabase:
                                    AS cardio_calories_kcal,
                                count(*) FILTER (WHERE source='lianlian' AND status='completed' AND record_type='strength') AS strength_sessions,
                                COALESCE(sum(duration_seconds) FILTER (
-                                   WHERE source='lianlian'), 0) AS strength_duration_seconds
+                                   WHERE source='lianlian' AND status='completed'
+                                     AND record_type='strength'), 0) AS strength_duration_seconds
                            FROM fitness_workout_sessions
                            WHERE COALESCE(session_date,
                                           (started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s""",
