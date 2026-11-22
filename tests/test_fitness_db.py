@@ -12,6 +12,7 @@ from app.fitness_db import (
     _as_datetime,
     _record_time,
     _source_id,
+    _workout_sample_rows,
 )
 
 
@@ -182,3 +183,27 @@ def test_fat_loss_summary_session_cte_projects_filter_columns() -> None:
         "weekly_sessions AS", 1
     )[0]
     assert "source, modality, status, record_type" in sessions_cte
+
+
+
+def test_workout_sample_rows_prepare_batch_and_preserve_sample_data() -> None:
+    sample = {"time": 1_795_314_930, "heart_rate_bpm": 145, "calories_raw": 2}
+    rows = _workout_sample_rows(
+        "xiaomi",
+        "1795314930",
+        {"samples": [sample, None, {"time": 1_795_314_934, "heart_rate_bpm": 0}]},
+    )
+
+    assert len(rows) == 2
+    assert rows[0][0:3] == ("xiaomi", "1795314930", 0)
+    assert rows[0][3] == datetime.fromtimestamp(1_795_314_930, timezone.utc)
+    assert rows[0][4] == 145.0
+    assert rows[0][5].obj == sample
+    assert rows[1][2] == 2
+    assert rows[1][4] == 0.0
+
+
+def test_workout_sample_rows_ignore_missing_or_invalid_samples() -> None:
+    assert _workout_sample_rows("xiaomi", "workout-1", {}) == []
+    assert _workout_sample_rows("xiaomi", "workout-1", {"samples": None}) == []
+    assert _workout_sample_rows("xiaomi", "workout-1", {"samples": [None, "bad"]}) == []

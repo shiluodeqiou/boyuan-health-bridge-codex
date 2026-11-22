@@ -492,6 +492,30 @@ def _record_time(row: dict[str, Any]) -> datetime | None:
     return None
 
 
+def _workout_sample_rows(
+    source: str,
+    external_id: str,
+    detail: dict[str, Any],
+) -> list[tuple[Any, ...]]:
+    """Prepare one workout's samples for a single batched database write."""
+    samples = detail.get("samples", [])
+    if not isinstance(samples, list):
+        return []
+    rows: list[tuple[Any, ...]] = []
+    for index, sample in enumerate(samples):
+        if not isinstance(sample, dict):
+            continue
+        rows.append((
+            source,
+            external_id,
+            index,
+            _record_time(sample),
+            _float_or_none(sample.get("heart_rate_bpm")),
+            Jsonb(sample),
+        ))
+    return rows
+
+
 def _source_id(row: dict[str, Any], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = row.get(key)
@@ -698,6 +722,7 @@ class FitnessDatabase:
                         )
                         metric_written += 1
 
+                sample_rows: list[tuple[Any, ...]] = []
                 for row in workout_rows:
                     if not isinstance(row, dict):
                         continue
@@ -736,13 +761,12 @@ class FitnessDatabase:
                     workout_written += 1
 
                     detail = details.get(external_id) or details.get(str(row.get("workout_time")))
-                    if not isinstance(detail, dict):
-                        continue
-                    samples = detail.get("samples", [])
-                    for index, sample in enumerate(samples):
-                        if not isinstance(sample, dict):
-                            continue
-                        await conn.execute(
+                    if isinstance(detail, dict):
+                        sample_rows.extend(_workout_sample_rows(source, external_id, detail))
+
+                if sample_rows:
+                    async with conn.cursor() as sample_cursor:
+                        await sample_cursor.executemany(
                             """INSERT INTO fitness_workout_samples
                                (source, external_id, sample_index, recorded_at, heart_rate_bpm, raw_data)
                                VALUES (%s,%s,%s,%s,%s,%s)
@@ -750,12 +774,9 @@ class FitnessDatabase:
                                DO UPDATE SET recorded_at=EXCLUDED.recorded_at,
                                  heart_rate_bpm=EXCLUDED.heart_rate_bpm,
                                  raw_data=EXCLUDED.raw_data""",
-                            (
-                                source, external_id, index, _record_time(sample),
-                                _float_or_none(sample.get("heart_rate_bpm")), Jsonb(sample),
-                            ),
+                            sample_rows,
                         )
-                        sample_written += 1
+                    sample_written = len(sample_rows)
 
                 latest_times = [
                     _record_time(row) for row in body_rows + workout_rows if isinstance(row, dict)
