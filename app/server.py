@@ -198,6 +198,43 @@ async def get_fitness_database_summary(days: int = 30) -> dict:
 
 
 @mcp.tool(
+    title="查看分段身体成分趋势",
+    description="从 Neon 读取最近指定天数的体脂秤分段脂肪量或肌肉量趋势。支持躯干、左右上肢、左右下肢；按每日最后一次测量聚合，不补零，并提供移动平均。注意下肢整体数据不等于独立大腿数据。",
+    annotations=READ_ONLY,
+)
+async def get_segmental_body_trends(
+    days: int = 30,
+    metric: str = "fat_mass",
+    parts: list[str] | None = None,
+    smoothing_window: int = 7,
+) -> dict:
+    return await fitness_database.segmental_body_trends(
+        days=days,
+        metric=metric,
+        parts=parts,
+        smoothing_window=smoothing_window,
+    )
+
+
+@mcp.tool(
+    title="查看健身数据质量报告",
+    description="检查最近指定天数的身体成分覆盖率、力量训练组完成状态、健康指标数量、逐秒运动采样和同步状态；不返回原始健康 JSON。",
+    annotations=READ_ONLY,
+)
+async def get_data_quality_report(days: int = 30) -> dict:
+    return await fitness_database.data_quality_report(days)
+
+
+@mcp.tool(
+    title="查看数据同步状态",
+    description="查看小米和练练健身各数据资源的最后成功同步、最近一次尝试、最新源记录时间及最近同步日志。",
+    annotations=READ_ONLY,
+)
+async def get_sync_status() -> dict:
+    return await fitness_database.sync_status()
+
+
+@mcp.tool(
     title="检查练练健身连接",
     description="检查 Render 是否配置练练健身 API Token；不会返回密钥。",
     annotations=READ_ONLY,
