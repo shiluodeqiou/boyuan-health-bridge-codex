@@ -1084,7 +1084,8 @@ class FitnessDatabase:
                     """WITH sessions AS (
                            SELECT COALESCE(session_date,
                                            (started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
-                                  source, modality, duration_seconds,
+                                  source, modality, status, record_type,
+                                  duration_seconds,
                                   COALESCE(active_calories_kcal, total_calories_kcal,
                                            calories_kcal) AS calories_kcal,
                                   external_id
