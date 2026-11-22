@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+from contextlib import asynccontextmanager
+from contextvars import ContextVar
 import os
 import re
 from datetime import datetime
@@ -13,6 +15,24 @@ SKILL_URL = "https://lianlian.gzyunke.cn/api/v1/ai/skill"
 API_BASE_URL = "https://lianlian.gzyunke.cn"
 SKILL_VERSION = "1.29.0"
 AGENT_NAME = "ChatGPT"
+
+_TRAINING_RECORDS_HTTP_CLIENT: ContextVar[httpx.AsyncClient | None] = ContextVar(
+    "training_records_http_client", default=None
+)
+
+
+@asynccontextmanager
+async def training_records_http_session():
+    """Reuse one HTTP connection pool across a complete paginated sync."""
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0),
+        follow_redirects=False,
+    ) as client:
+        token = _TRAINING_RECORDS_HTTP_CLIENT.set(client)
+        try:
+            yield
+        finally:
+            _TRAINING_RECORDS_HTTP_CLIENT.reset(token)
 
 
 def _token() -> str:
@@ -126,16 +146,22 @@ async def _get_training_records_request(
         "page": page,
         "pageSize": page_size,
     }
-    async with httpx.AsyncClient(
-        timeout=httpx.Timeout(30.0),
-        follow_redirects=False,
-    ) as client:
-        response = await client.get(
+    client = _TRAINING_RECORDS_HTTP_CLIENT.get()
+    if client is not None:
+        return await client.get(
             f"{API_BASE_URL}/api/v1/ai/training/records",
             headers=headers,
             params=params,
         )
-    return response
+    async with httpx.AsyncClient(
+        timeout=httpx.Timeout(30.0),
+        follow_redirects=False,
+    ) as owned_client:
+        return await owned_client.get(
+            f"{API_BASE_URL}/api/v1/ai/training/records",
+            headers=headers,
+            params=params,
+        )
 
 
 async def get_training_records_page(
