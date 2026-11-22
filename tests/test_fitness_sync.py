@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import app.fitness_sync as fitness_sync
@@ -8,6 +10,7 @@ from app.fitness_sync import (
     fetch_all_lianlian_records,
     normalize_lianlian_record,
     sync_xiaomi_to_database,
+    sync_unified_fitness_data,
 )
 
 
@@ -204,3 +207,31 @@ async def test_xiaomi_sync_persists_sport_detail_errors_as_partial() -> None:
     }
     assert result["status"] == "partial"
     assert result["sport_detail_errors"] == {"123456": "RuntimeError"}
+
+
+@pytest.mark.asyncio
+async def test_unified_sync_runs_sources_concurrently(monkeypatch) -> None:
+    events: list[str] = []
+
+    async def fake_xiaomi(*args, **kwargs):
+        events.append("xiaomi:start")
+        await asyncio.sleep(0)
+        events.append("xiaomi:end")
+        return {"status": "success"}
+
+    async def fake_lianlian(*args, **kwargs):
+        events.append("lianlian:start")
+        await asyncio.sleep(0)
+        events.append("lianlian:end")
+        return {"status": "success"}
+
+    monkeypatch.setattr(fitness_sync, "sync_xiaomi_to_database", fake_xiaomi)
+    monkeypatch.setattr(fitness_sync, "sync_lianlian_to_database", fake_lianlian)
+
+    result = await sync_unified_fitness_data(object(), object(), days=30)
+
+    assert events == [
+        "xiaomi:start", "lianlian:start", "xiaomi:end", "lianlian:end"
+    ]
+    assert result["status"] == "success"
+    assert set(result["sources"]) == {"xiaomi", "lianlian"}
