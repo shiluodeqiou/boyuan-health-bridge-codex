@@ -323,12 +323,12 @@ latest_body AS (
 workout_rollup AS (
   SELECT COALESCE(session_date, (started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
     count(*) FILTER (WHERE source='xiaomi') AS xiaomi_workout_count,
-    count(*) FILTER (WHERE source='lianlian') AS strength_session_count,
+    count(*) FILTER (WHERE source='lianlian' AND status='completed' AND record_type='strength') AS strength_session_count,
     sum(duration_seconds) FILTER (WHERE source='xiaomi') AS xiaomi_duration_seconds,
-    sum(duration_seconds) FILTER (WHERE source='lianlian') AS strength_duration_seconds,
+    sum(duration_seconds) FILTER (WHERE source='lianlian' AND status='completed' AND record_type='strength') AS strength_duration_seconds,
     sum(COALESCE(active_calories_kcal,total_calories_kcal,calories_kcal))
       FILTER (WHERE source='xiaomi') AS xiaomi_calories_kcal,
-    sum(calories_kcal) FILTER (WHERE source='lianlian') AS strength_calories_kcal
+    sum(calories_kcal) FILTER (WHERE source='lianlian' AND status='completed' AND record_type='strength') AS strength_calories_kcal
   FROM fitness_workout_sessions
   WHERE session_date IS NOT NULL OR started_at IS NOT NULL
   GROUP BY 1
@@ -350,7 +350,7 @@ strength_rollup AS (
   JOIN fitness_strength_sets st
     ON st.source=e.source AND st.external_id=e.external_id
    AND st.exercise_index=e.exercise_index
-  WHERE s.source='lianlian'
+  WHERE s.source='lianlian' AND s.status='completed' AND s.record_type='strength'
   GROUP BY 1
 ),
 latest_health AS (
@@ -439,7 +439,7 @@ JOIN fitness_strength_exercises e
 JOIN fitness_strength_sets st
   ON st.source=e.source AND st.external_id=e.external_id
  AND st.exercise_index=e.exercise_index
-WHERE s.source='lianlian'
+WHERE s.source='lianlian' AND s.status='completed' AND s.record_type='strength'
 GROUP BY 1, e.exercise_name;
 
 """
@@ -1094,7 +1094,7 @@ class FitnessDatabase:
                        ),
                        weekly_sessions AS (
                            SELECT date_trunc('week', day::timestamp)::date AS week_start,
-                                  count(*) FILTER (WHERE source='lianlian') AS strength_sessions,
+                                  count(*) FILTER (WHERE source='lianlian' AND status='completed' AND record_type='strength') AS strength_sessions,
                                   count(*) FILTER (WHERE source='xiaomi'
                                                    AND modality='cardio') AS cardio_sessions,
                                   round(COALESCE(sum(duration_seconds) FILTER (
@@ -1121,7 +1121,7 @@ class FitnessDatabase:
                            JOIN fitness_strength_sets st
                              ON st.source=e.source AND st.external_id=e.external_id
                             AND st.exercise_index=e.exercise_index
-                           WHERE s.source='lianlian'
+                           WHERE s.source='lianlian' AND s.status='completed' AND s.record_type='strength'
                            GROUP BY 1
                        )
                        SELECT ws.week_start, ws.strength_sessions, ws.cardio_sessions,
@@ -1202,7 +1202,7 @@ class FitnessDatabase:
                                                      total_calories_kcal, calories_kcal))
                                    FILTER (WHERE source='xiaomi' AND modality='cardio'), 0)
                                    AS cardio_calories_kcal,
-                               count(*) FILTER (WHERE source='lianlian') AS strength_sessions,
+                               count(*) FILTER (WHERE source='lianlian' AND status='completed' AND record_type='strength') AS strength_sessions,
                                COALESCE(sum(duration_seconds) FILTER (
                                    WHERE source='lianlian'), 0) AS strength_duration_seconds
                            FROM fitness_workout_sessions
@@ -1309,7 +1309,7 @@ class FitnessDatabase:
                         AND st.exercise_index=e.exercise_index
                        JOIN fitness_workout_sessions s
                          ON s.source=e.source AND s.external_id=e.external_id
-                       WHERE e.source='lianlian'
+                       WHERE e.source='lianlian' AND s.status='completed' AND s.record_type='strength'
                          AND COALESCE(s.session_date,
                                       (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s
                        GROUP BY e.exercise_name
@@ -1651,7 +1651,7 @@ class FitnessDatabase:
                        JOIN fitness_strength_sets st
                          ON st.source=e.source AND st.external_id=e.external_id
                         AND st.exercise_index=e.exercise_index
-                       WHERE s.source='lianlian'
+                       WHERE s.source='lianlian' AND s.status='completed' AND s.record_type='strength'
                          AND COALESCE(s.session_date,
                                       (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s""",
                     (since_date,),
