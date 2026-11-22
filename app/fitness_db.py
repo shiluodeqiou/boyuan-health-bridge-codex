@@ -1515,7 +1515,7 @@ class FitnessDatabase:
                         "resource": row[1],
                         "last_success_at": row[2].isoformat() if row[2] else None,
                         "latest_record_at": row[3].isoformat() if row[3] else None,
-                        "records_seen_in_last_success": row[4],
+                        "records_seen_in_last_sync": row[4],
                         "last_attempt_status": row[5],
                         "last_attempt_started_at": row[6].isoformat() if row[6] else None,
                         "last_attempt_finished_at": row[7].isoformat() if row[7] else None,
