@@ -179,6 +179,6 @@ async def test_cardio_analysis_rejects_invalid_period_before_database_access() -
 def test_fat_loss_summary_session_cte_projects_filter_columns() -> None:
     source = inspect.getsource(FitnessDatabase.fat_loss_summary)
     sessions_cte = source.split("WITH sessions AS (", 1)[1].split(
-        "),\\n                       weekly_sessions AS", 1
+        "weekly_sessions AS", 1
     )[0]
     assert "source, modality, status, record_type" in sessions_cte
