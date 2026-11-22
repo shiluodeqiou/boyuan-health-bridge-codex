@@ -8,7 +8,6 @@ from app.fitness_db import CN_TZ, FitnessDatabase
 from app.health import HealthBridge
 from app.lianlian import get_training_records_page, training_records_http_session
 
-
 HEALTH_METRICS = (
     "heart_rate",
     "sleep",
