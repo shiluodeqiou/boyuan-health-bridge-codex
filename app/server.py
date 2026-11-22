@@ -173,7 +173,7 @@ async def sync_unified_fitness_database(
 
 @mcp.tool(
     title="查看统一健身分析仪表盘",
-    description="从 Neon 读取统一健身分析。默认返回轻量汇总，包含体重、体脂率、脂肪量、肌肉量的首末值和 7 日均值，以及按周训练次数、完成组数、有氧时长和热量。需要逐日趋势、动作进步和原始健康指标时设置 include_details=true。days 为 1 到 3650。",
+    description="从 Neon 读取综合健身仪表盘。默认返回身体成分、每周训练统计，以及日常步数、睡眠、静息心率和有氧/力量活动汇总；设置 include_details=true 才读取逐日时间轴、动作进步和健康指标明细。days 为 1 到 3650。",
     annotations=READ_ONLY,
 )
 async def get_fitness_dashboard(days: int = 90, include_details: bool = False) -> dict:
@@ -221,6 +221,30 @@ async def get_segmental_body_trends(
         parts=parts,
         smoothing_window=smoothing_window,
     )
+
+
+@mcp.tool(
+    title="查看单个动作力量进步",
+    description="从 Neon 读取指定动作最近 1–3650 天的逐次训练进步，包括完成组数、未知组数、次数、kg 训练容量、最大重量和 Epley 估算 1RM。exercise_name 使用练练记录中的动作原名。",
+    annotations=READ_ONLY,
+)
+async def get_strength_progression(
+    exercise_name: str,
+    days: int = 90,
+) -> dict:
+    return await fitness_database.strength_progression(
+        exercise_name=exercise_name,
+        days=days,
+    )
+
+
+@mcp.tool(
+    title="查看有氧运动分析",
+    description="从 Neon 读取最近指定天数的小米有氧运动记录，按项目汇总次数、时长、热量和心率；逐秒采样存在时标记可进一步计算心率区间。",
+    annotations=READ_ONLY,
+)
+async def get_cardio_analysis(days: int = 30) -> dict:
+    return await fitness_database.cardio_analysis(days)
 
 
 @mcp.tool(
