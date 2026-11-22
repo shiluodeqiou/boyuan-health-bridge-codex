@@ -263,3 +263,21 @@ async def test_xiaomi_sync_marks_sport_pagination_warnings_as_partial() -> None:
 
     assert result["status"] == "partial"
     assert result["sport_record_notes"] == ["运动记录超过单次读取页数上限"]
+
+
+@pytest.mark.asyncio
+async def test_unified_sync_reports_partial_when_one_source_fails(monkeypatch) -> None:
+    async def fail_xiaomi(*args, **kwargs):
+        raise RuntimeError("Xiaomi upstream timeout")
+
+    async def succeed_lianlian(*args, **kwargs):
+        return {"status": "success", "strength_sessions_upserted": 1}
+
+    monkeypatch.setattr(fitness_sync, "sync_xiaomi_to_database", fail_xiaomi)
+    monkeypatch.setattr(fitness_sync, "sync_lianlian_to_database", succeed_lianlian)
+
+    result = await sync_unified_fitness_data(object(), object(), days=30)
+
+    assert result["status"] == "partial"
+    assert result["errors"]["xiaomi"] == "RuntimeError: Xiaomi upstream timeout"
+    assert result["sources"]["lianlian"]["strength_sessions_upserted"] == 1
