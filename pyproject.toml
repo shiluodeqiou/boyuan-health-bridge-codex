@@ -14,7 +14,7 @@ dependencies = [
   "httpx>=0.28.1,<1",
   "mcp>=2.0.0,<3",
   "mi-fitness==0.2.0",
-  "psycopg[binary]>=3.2,<4",
+  "psycopg[binary,pool]>=3.2,<4",
   "python-multipart>=0.0.20,<1",
   "starlette>=0.47,<1",
   "uvicorn[standard]>=0.35,<1",
