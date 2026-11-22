@@ -338,6 +338,7 @@ async def sync_xiaomi_to_database(
         "body_history_complete": body_composition.get("history_complete"),
         "body_history_pages": body_composition.get("pages_fetched"),
         "sport_record_count": sport_records.get("count", 0),
+        "sport_record_notes": sport_records.get("notes", []),
         "health_metrics_read": {
             key: len(value) if isinstance(value, list) else None
             for key, value in health_metrics.items()
@@ -351,6 +352,7 @@ async def sync_xiaomi_to_database(
     result["status"] = (
         "success"
         if body_composition.get("history_complete") is not False
+        and not sport_records.get("notes")
         and not result["health_metric_errors"]
         and not detail_errors
         else "partial"
