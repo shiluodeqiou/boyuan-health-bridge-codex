@@ -77,7 +77,7 @@ def test_api_headers_include_keepstrong_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_training_records_page_returns_raw_payload_without_writing(monkeypatch) -> None:
-        monkeypatch.setattr(lianlian, "_token", lambda: "test-token")
+    monkeypatch.setattr(lianlian, "_token", lambda: "test-token")
     calls = []
 
     async def fake_request(token, **kwargs):
