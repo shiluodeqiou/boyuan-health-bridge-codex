@@ -5,6 +5,7 @@ import contextlib
 import hmac
 import html
 from dataclasses import dataclass
+from typing import Literal
 
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
@@ -199,13 +200,19 @@ async def get_fitness_database_summary(days: int = 30) -> dict:
 
 @mcp.tool(
     title="查看分段身体成分趋势",
-    description="从 Neon 读取最近指定天数的体脂秤分段脂肪量或肌肉量趋势。支持躯干、左右上肢、左右下肢；按每日最后一次测量聚合，不补零，并提供移动平均。注意下肢整体数据不等于独立大腿数据。",
+    description="从 Neon 读取最近指定天数的体脂秤分段脂肪量或肌肉量趋势。metric 可选 fat_mass/muscle_mass；parts 可选 trunk、left_upper_limb、right_upper_limb、left_lower_limb、right_lower_limb，省略时返回全部。按每日最后一次测量聚合，不补零；smoothing_window 为最近有效测量次数。下肢整体数据不等于独立大腿数据。",
     annotations=READ_ONLY,
 )
 async def get_segmental_body_trends(
     days: int = 30,
-    metric: str = "fat_mass",
-    parts: list[str] | None = None,
+    metric: Literal["fat_mass", "muscle_mass"] = "fat_mass",
+    parts: list[Literal[
+        "trunk",
+        "left_upper_limb",
+        "right_upper_limb",
+        "left_lower_limb",
+        "right_lower_limb",
+    ]] | None = None,
     smoothing_window: int = 7,
 ) -> dict:
     return await fitness_database.segmental_body_trends(
@@ -218,7 +225,7 @@ async def get_segmental_body_trends(
 
 @mcp.tool(
     title="查看健身数据质量报告",
-    description="检查最近指定天数的身体成分覆盖率、力量训练组完成状态、健康指标数量、逐秒运动采样和同步状态；不返回原始健康 JSON。",
+    description="检查最近 1–3650 天的身体成分覆盖率、力量训练组完成状态、健康指标数量、逐秒运动采样和同步状态；不返回原始健康 JSON。",
     annotations=READ_ONLY,
 )
 async def get_data_quality_report(days: int = 30) -> dict:
