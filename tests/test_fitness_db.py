@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
 import inspect
+from datetime import date, datetime, timezone
 
 import pytest
 
