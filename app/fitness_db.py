@@ -1148,7 +1148,7 @@ class FitnessDatabase:
                      modality, record_type, training_type, status, calories_kcal,
                      training_capacity, source_metadata, raw_data)
                     VALUES (%s,%s,'strength_training',%s,%s,%s,%s,NULL,NULL,%s,NULL,
-                            %s,'strength',%s,%s,%s,%s,%s,%s,%s,%s)
+                            %s,'strength',%s,%s,%s,%s,%s,%s,%s)
                     ON CONFLICT (source, external_id)
                     DO UPDATE SET category=EXCLUDED.category,
                       sport_name=EXCLUDED.sport_name, started_at=EXCLUDED.started_at,
