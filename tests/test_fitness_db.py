@@ -150,3 +150,12 @@ async def test_segmental_trends_reject_invalid_part_before_database_access() -> 
 async def test_segmental_trends_reject_invalid_smoothing_window_before_database_access() -> None:
     with pytest.raises(ValueError, match="smoothing_window"):
         await FitnessDatabase().segmental_body_trends(smoothing_window=0)
+
+
+
+def test_strength_views_exclude_planned_and_non_strength_sessions() -> None:
+    assert "s.status='completed' AND s.record_type='strength'" in SCHEMA_SQL
+    assert (
+        "FILTER (WHERE source='lianlian' AND status='completed' "
+        "AND record_type='strength')" in SCHEMA_SQL
+    )
