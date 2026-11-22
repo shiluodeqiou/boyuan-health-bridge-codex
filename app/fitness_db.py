@@ -5,12 +5,11 @@ import hashlib
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import date, datetime, time, timedelta, timezone
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 
-import psycopg
-from psycopg_pool import AsyncConnectionPool
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 CN_TZ = timezone(timedelta(hours=8))
 
@@ -481,7 +480,7 @@ def _as_datetime(value: Any) -> datetime | None:
         return None
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(float(value), timezone.utc)
+            return datetime.fromtimestamp(float(value), UTC)
         except (OverflowError, OSError, ValueError):
             return None
     if isinstance(value, str):
