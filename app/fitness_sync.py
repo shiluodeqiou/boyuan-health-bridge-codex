@@ -5,8 +5,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.fitness_db import CN_TZ, FitnessDatabase
-from app.lianlian import get_training_records_page, training_records_http_session
 from app.health import HealthBridge
+from app.lianlian import get_training_records_page, training_records_http_session
 
 
 HEALTH_METRICS = (
