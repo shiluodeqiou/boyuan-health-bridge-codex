@@ -109,6 +109,11 @@ CREATE TABLE IF NOT EXISTS fitness_workout_sessions (
     total_calories_kcal DOUBLE PRECISION,
     average_heart_rate_bpm DOUBLE PRECISION,
     maximum_heart_rate_bpm DOUBLE PRECISION,
+    hrm_warmup_duration_seconds INTEGER,
+    hrm_fat_burning_duration_seconds INTEGER,
+    hrm_aerobic_duration_seconds INTEGER,
+    hrm_anaerobic_duration_seconds INTEGER,
+    hrm_extreme_duration_seconds INTEGER,
     session_date DATE,
     modality TEXT,
     record_type TEXT,
@@ -205,6 +210,11 @@ ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS status TEXT;
 ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS calories_kcal DOUBLE PRECISION;
 ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS training_capacity DOUBLE PRECISION;
 ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS source_metadata JSONB NOT NULL DEFAULT '{}'::jsonb;
+ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS hrm_warmup_duration_seconds INTEGER;
+ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS hrm_fat_burning_duration_seconds INTEGER;
+ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS hrm_aerobic_duration_seconds INTEGER;
+ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS hrm_anaerobic_duration_seconds INTEGER;
+ALTER TABLE fitness_workout_sessions ADD COLUMN IF NOT EXISTS hrm_extreme_duration_seconds INTEGER;
 
 ALTER TABLE fitness_strength_exercises ADD COLUMN IF NOT EXISTS action_id TEXT;
 ALTER TABLE fitness_strength_exercises ADD COLUMN IF NOT EXISTS weight_unit TEXT;
@@ -516,6 +526,35 @@ def _workout_sample_rows(
     return rows
 
 
+def _workout_zone_durations(detail: dict[str, Any]) -> dict[str, int | None] | None:
+    """Read Xiaomi's own five-zone durations from a workout detail summary."""
+    workout = detail.get("workout")
+    summary = workout.get("summary") if isinstance(workout, dict) else None
+    if not isinstance(summary, dict):
+        summary = detail.get("summary")
+    if not isinstance(summary, dict):
+        return None
+
+    durations = {
+        "hrm_warmup_duration_seconds": _int_or_none(
+            summary.get("hrm_warm_up_duration")
+        ),
+        "hrm_fat_burning_duration_seconds": _int_or_none(
+            summary.get("hrm_fat_burning_duration")
+        ),
+        "hrm_aerobic_duration_seconds": _int_or_none(
+            summary.get("hrm_aerobic_duration")
+        ),
+        "hrm_anaerobic_duration_seconds": _int_or_none(
+            summary.get("hrm_anaerobic_duration")
+        ),
+        "hrm_extreme_duration_seconds": _int_or_none(
+            summary.get("hrm_extreme_duration")
+        ),
+    }
+    return durations if any(value is not None for value in durations.values()) else None
+
+
 def _source_id(row: dict[str, Any], keys: tuple[str, ...]) -> str:
     for key in keys:
         value = row.get(key)
@@ -729,13 +768,20 @@ class FitnessDatabase:
                     external_id = _source_id(row, ("workout_time", "id", "record_id"))
                     started_at = _record_time(row)
                     ended_at = _as_datetime(row.get("end_time"))
+                    detail = details.get(external_id) or details.get(str(row.get("workout_time")))
+                    zone_durations = (
+                        _workout_zone_durations(detail) if isinstance(detail, dict) else None
+                    )
+                    zone_values = zone_durations or {}
                     await conn.execute(
                         """INSERT INTO fitness_workout_sessions
                            (source, external_id, category, sport_name, started_at, ended_at,
                             duration_seconds, active_calories_kcal, total_calories_kcal,
-                            average_heart_rate_bpm, maximum_heart_rate_bpm, session_date,
-                            modality, raw_data)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                            average_heart_rate_bpm, maximum_heart_rate_bpm,
+                            hrm_warmup_duration_seconds, hrm_fat_burning_duration_seconds,
+                            hrm_aerobic_duration_seconds, hrm_anaerobic_duration_seconds,
+                            hrm_extreme_duration_seconds, session_date, modality, raw_data)
+                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
                            ON CONFLICT (source, external_id)
                            DO UPDATE SET category=EXCLUDED.category, sport_name=EXCLUDED.sport_name,
                              started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at,
@@ -744,6 +790,21 @@ class FitnessDatabase:
                              total_calories_kcal=EXCLUDED.total_calories_kcal,
                              average_heart_rate_bpm=EXCLUDED.average_heart_rate_bpm,
                              maximum_heart_rate_bpm=EXCLUDED.maximum_heart_rate_bpm,
+                             hrm_warmup_duration_seconds=COALESCE(
+                               EXCLUDED.hrm_warmup_duration_seconds,
+                               fitness_workout_sessions.hrm_warmup_duration_seconds),
+                             hrm_fat_burning_duration_seconds=COALESCE(
+                               EXCLUDED.hrm_fat_burning_duration_seconds,
+                               fitness_workout_sessions.hrm_fat_burning_duration_seconds),
+                             hrm_aerobic_duration_seconds=COALESCE(
+                               EXCLUDED.hrm_aerobic_duration_seconds,
+                               fitness_workout_sessions.hrm_aerobic_duration_seconds),
+                             hrm_anaerobic_duration_seconds=COALESCE(
+                               EXCLUDED.hrm_anaerobic_duration_seconds,
+                               fitness_workout_sessions.hrm_anaerobic_duration_seconds),
+                             hrm_extreme_duration_seconds=COALESCE(
+                               EXCLUDED.hrm_extreme_duration_seconds,
+                               fitness_workout_sessions.hrm_extreme_duration_seconds),
                              session_date=EXCLUDED.session_date, modality=EXCLUDED.modality,
                              raw_data=EXCLUDED.raw_data, updated_at=now()""",
                         (
@@ -753,6 +814,11 @@ class FitnessDatabase:
                             _float_or_none(row.get("total_calories_kcal")),
                             _float_or_none(row.get("average_heart_rate_bpm")),
                             _float_or_none(row.get("maximum_heart_rate_bpm")),
+                            zone_values.get("hrm_warmup_duration_seconds"),
+                            zone_values.get("hrm_fat_burning_duration_seconds"),
+                            zone_values.get("hrm_aerobic_duration_seconds"),
+                            zone_values.get("hrm_anaerobic_duration_seconds"),
+                            zone_values.get("hrm_extreme_duration_seconds"),
                             started_at.astimezone(CN_TZ).date() if started_at else None,
                             "strength" if row.get("category") in ("strength_training", "free_training") else "cardio",
                             Jsonb(row),
@@ -760,7 +826,6 @@ class FitnessDatabase:
                     )
                     workout_written += 1
 
-                    detail = details.get(external_id) or details.get(str(row.get("workout_time")))
                     if isinstance(detail, dict):
                         sample_rows.extend(_workout_sample_rows(source, external_id, detail))
 
@@ -1835,12 +1900,19 @@ class FitnessDatabase:
         }
 
     async def cardio_analysis(self, days: int = 30) -> dict[str, Any]:
-        """Summarize Xiaomi cardio sessions and indicate whether samples exist."""
+        """Summarize Xiaomi cardio sessions and provider-reported heart-rate zones."""
         if not 1 <= days <= 3650:
             raise ValueError("days 必须在 1 到 3650 之间")
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
+        zone_fields = {
+            "warm_up": "hrm_warmup_duration_seconds",
+            "fat_burning": "hrm_fat_burning_duration_seconds",
+            "aerobic": "hrm_aerobic_duration_seconds",
+            "anaerobic": "hrm_anaerobic_duration_seconds",
+            "extreme": "hrm_extreme_duration_seconds",
+        }
         async with await self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
@@ -1849,7 +1921,12 @@ class FitnessDatabase:
                               sport_name, started_at, duration_seconds,
                               COALESCE(active_calories_kcal,
                                        total_calories_kcal, calories_kcal) AS calories_kcal,
-                              average_heart_rate_bpm, maximum_heart_rate_bpm
+                              average_heart_rate_bpm, maximum_heart_rate_bpm,
+                              hrm_warmup_duration_seconds,
+                              hrm_fat_burning_duration_seconds,
+                              hrm_aerobic_duration_seconds,
+                              hrm_anaerobic_duration_seconds,
+                              hrm_extreme_duration_seconds
                        FROM fitness_workout_sessions
                        WHERE source='xiaomi' AND modality='cardio'
                          AND COALESCE(session_date,
@@ -1859,8 +1936,20 @@ class FitnessDatabase:
                     (since_date,),
                 )
                 rows = await cur.fetchall()
-                sessions = [
-                    {
+                sessions = []
+                for row in rows:
+                    zone_durations = {
+                        zone: row[index]
+                        for index, zone in enumerate(zone_fields, start=7)
+                    }
+                    has_zone_data = any(
+                        value is not None for value in zone_durations.values()
+                    )
+                    zone_total = (
+                        sum(value for value in zone_durations.values() if value is not None)
+                        if has_zone_data else None
+                    )
+                    sessions.append({
                         "date": row[0].isoformat() if row[0] else None,
                         "sport_name": row[1],
                         "started_at": row[2].isoformat() if row[2] else None,
@@ -1868,9 +1957,17 @@ class FitnessDatabase:
                         "calories_kcal": float(row[4]) if row[4] is not None else None,
                         "average_heart_rate_bpm": row[5],
                         "maximum_heart_rate_bpm": row[6],
-                    }
-                    for row in rows
-                ]
+                        "heart_rate_zone_durations_seconds": zone_durations,
+                        "heart_rate_zone_total_seconds": zone_total,
+                        "heart_rate_zone_percentages": {
+                            zone: (
+                                round(value * 100 / zone_total, 1)
+                                if value is not None and zone_total > 0 else None
+                            )
+                            for zone, value in zone_durations.items()
+                        },
+                    })
+
                 await cur.execute(
                     """SELECT count(*)
                        FROM fitness_workout_samples ws
@@ -1894,6 +1991,13 @@ class FitnessDatabase:
                     "calories_kcal": 0.0,
                     "average_heart_rates": [],
                     "maximum_heart_rate_bpm": None,
+                    "heart_rate_zone_durations_seconds": {
+                        zone: 0 for zone in zone_fields
+                    },
+                    "heart_rate_zone_value_counts": {
+                        zone: 0 for zone in zone_fields
+                    },
+                    "sessions_with_zone_data": 0,
                 },
             )
             group["sessions"] += 1
@@ -1906,6 +2010,12 @@ class FitnessDatabase:
                 group["maximum_heart_rate_bpm"] = max(
                     current or 0, session["maximum_heart_rate_bpm"]
                 )
+            if session["heart_rate_zone_total_seconds"] is not None:
+                group["sessions_with_zone_data"] += 1
+                for zone, seconds in session["heart_rate_zone_durations_seconds"].items():
+                    if seconds is not None:
+                        group["heart_rate_zone_durations_seconds"][zone] += seconds
+                        group["heart_rate_zone_value_counts"][zone] += 1
 
         for group in by_sport.values():
             heart_rates = group.pop("average_heart_rates")
@@ -1914,6 +2024,59 @@ class FitnessDatabase:
             group["average_session_heart_rate_bpm"] = (
                 round(sum(heart_rates) / len(heart_rates), 1) if heart_rates else None
             )
+            group["heart_rate_zone_durations_minutes"] = {
+                zone: (
+                    round(seconds / 60, 1)
+                    if group["heart_rate_zone_value_counts"][zone] else None
+                )
+                for zone, seconds in group["heart_rate_zone_durations_seconds"].items()
+            }
+            group["heart_rate_zone_durations_seconds"] = {
+                zone: (
+                    seconds if group["heart_rate_zone_value_counts"][zone] else None
+                )
+                for zone, seconds in group["heart_rate_zone_durations_seconds"].items()
+            }
+            group.pop("heart_rate_zone_value_counts")
+
+        zone_sessions = [
+            session for session in sessions
+            if session["heart_rate_zone_total_seconds"] is not None
+        ]
+        zone_totals: dict[str, int | None] = {}
+        for zone in zone_fields:
+            values = [
+                session["heart_rate_zone_durations_seconds"][zone]
+                for session in zone_sessions
+                if session["heart_rate_zone_durations_seconds"][zone] is not None
+            ]
+            zone_totals[zone] = sum(values) if values else None
+        classified_seconds = sum(value or 0 for value in zone_totals.values())
+        zone_session_duration = sum(
+            session["duration_seconds"] or 0 for session in zone_sessions
+        )
+        zone_summary = {
+            "provider": "xiaomi_workout_summary",
+            "sessions_with_zone_data": len(zone_sessions),
+            "classified_time_seconds": classified_seconds,
+            "classified_time_minutes": round(classified_seconds / 60, 1),
+            "zone_durations_seconds": zone_totals,
+            "zone_durations_minutes": {
+                zone: round(value / 60, 1) if value is not None else None
+                for zone, value in zone_totals.items()
+            },
+            "zone_percentages": {
+                zone: (
+                    round(value * 100 / classified_seconds, 1)
+                    if value is not None and classified_seconds > 0 else None
+                )
+                for zone, value in zone_totals.items()
+            },
+            "classified_time_coverage_percent": (
+                round(classified_seconds * 100 / zone_session_duration, 1)
+                if zone_session_duration > 0 else None
+            ),
+        }
 
         return {
             "database": "postgresql",
@@ -1930,9 +2093,12 @@ class FitnessDatabase:
             "by_sport": by_sport,
             "sessions": sessions,
             "sample_count": sample_count,
-            "heart_rate_zone_analysis_available": sample_count > 0,
+            "heart_rate_zone_analysis_available": bool(zone_sessions),
+            "heart_rate_zone_summary": zone_summary,
             "notes": [
-                "热量优先使用设备提供的活动热量；缺失时才回退到总热量或会话热量。",
-                "当前没有逐秒采样时，只能比较单次平均/最高心率，不能计算完整心率区间分布。",
+                "心率区间时长直接采用小米运动详情 summary 的设备分区字段，不使用年龄公式推算。",
+                "区间顺序为热身、燃脂、有氧、无氧、极限；设备未提供的字段保留为 null。",
+                "逐次采样数量与设备区间汇总是不同数据口径；采样用于曲线分析，区间汇总用于分区时长统计。",
+                "区间覆盖率是已分类区间时长占具有区间汇总的运动会话总时长的比例。",
             ],
         }

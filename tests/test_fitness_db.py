@@ -13,6 +13,7 @@ from app.fitness_db import (
     _record_time,
     _source_id,
     _workout_sample_rows,
+    _workout_zone_durations,
 )
 
 
@@ -207,3 +208,50 @@ def test_workout_sample_rows_ignore_missing_or_invalid_samples() -> None:
     assert _workout_sample_rows("xiaomi", "workout-1", {}) == []
     assert _workout_sample_rows("xiaomi", "workout-1", {"samples": None}) == []
     assert _workout_sample_rows("xiaomi", "workout-1", {"samples": [None, "bad"]}) == []
+
+
+
+def test_workout_zone_durations_read_device_summary_without_estimating() -> None:
+    detail = {
+        "workout": {
+            "summary": {
+                "hrm_warm_up_duration": 387,
+                "hrm_fat_burning_duration": 886,
+                "hrm_aerobic_duration": 1487,
+                "hrm_anaerobic_duration": 1099,
+                "hrm_extreme_duration": 0,
+            }
+        },
+        "samples": [{"time": 1_795_314_930, "heart_rate_bpm": 145}],
+    }
+    assert _workout_zone_durations(detail) == {
+        "hrm_warmup_duration_seconds": 387,
+        "hrm_fat_burning_duration_seconds": 886,
+        "hrm_aerobic_duration_seconds": 1487,
+        "hrm_anaerobic_duration_seconds": 1099,
+        "hrm_extreme_duration_seconds": 0,
+    }
+
+
+def test_workout_zone_durations_accept_top_level_summary_and_preserve_missing() -> None:
+    assert _workout_zone_durations({
+        "summary": {"hrm_aerobic_duration": "120"}
+    }) == {
+        "hrm_warmup_duration_seconds": None,
+        "hrm_fat_burning_duration_seconds": None,
+        "hrm_aerobic_duration_seconds": 120,
+        "hrm_anaerobic_duration_seconds": None,
+        "hrm_extreme_duration_seconds": None,
+    }
+    assert _workout_zone_durations({"samples": []}) is None
+
+
+def test_workout_session_schema_persists_device_heart_rate_zones() -> None:
+    for column in (
+        "hrm_warmup_duration_seconds",
+        "hrm_fat_burning_duration_seconds",
+        "hrm_aerobic_duration_seconds",
+        "hrm_anaerobic_duration_seconds",
+        "hrm_extreme_duration_seconds",
+    ):
+        assert column in SCHEMA_SQL

@@ -81,7 +81,7 @@
 - `get_data_quality_report(days=30)`：查看身体成分字段覆盖率、力量训练组完成状态、健康指标覆盖和逐秒运动采样情况。
 - `get_segmental_body_trends(days=30, metric="fat_mass", parts=null, smoothing_window=7)`：查看躯干、左右上肢和左右下肢脂肪量/肌肉量趋势；按每日最后一次测量聚合，缺失值不补零，移动平均按最近有效测量次数计算。下肢数据不是独立大腿数据。
 - `get_strength_progression(exercise_name, days=90)`：查看指定动作的逐次力量进步、有效组数、训练容量和估算 1RM。
-- `get_cardio_analysis(days=30)`：按有氧项目汇总次数、时长、热量、平均/最高心率，并检查逐秒采样可用性。
+- `get_cardio_analysis(days=30)`：按有氧项目汇总次数、时长、热量、平均/最高心率，并统计小米运动详情直接提供的热身、燃脂、有氧、无氧和极限区间时长；不使用年龄公式推算。
 - \`get_fitness_dashboard(days=90, include_details=false)\`：综合仪表盘，默认返回身体成分、每周训练统计、日常步数、睡眠、静息心率和有氧/力量活动汇总；设置 \`include_details=true\` 才读取每日时间轴、动作进步和健康指标明细。
 - \`get_fat_loss_summary(days=30)\`：专门用于最近减脂效果评价的紧凑接口，所有指标直接由 Neon 服务端聚合，不请求小米或练练健身上游接口。
 - \`get_lianlian_skill_manifest()\`：安全读取练练当前技能说明。

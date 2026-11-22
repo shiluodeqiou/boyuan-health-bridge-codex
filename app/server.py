@@ -240,7 +240,7 @@ async def get_strength_progression(
 
 @mcp.tool(
     title="查看有氧运动分析",
-    description="从 Neon 读取最近指定天数的小米有氧运动记录，按项目汇总次数、时长、热量和心率；逐秒采样存在时标记可进一步计算心率区间。",
+    description="从 Neon 读取最近指定天数的小米有氧运动记录，按项目汇总次数、时长、热量和心率；同时统计小米运动详情直接提供的热身、燃脂、有氧、无氧和极限区间时长，不使用年龄公式推算。",
     annotations=READ_ONLY,
 )
 async def get_cardio_analysis(days: int = 30) -> dict:
