@@ -3,7 +3,12 @@ from __future__ import annotations
 import pytest
 
 import app.fitness_sync as fitness_sync
-from app.fitness_sync import _duration_seconds, fetch_all_lianlian_records, normalize_lianlian_record
+from app.fitness_sync import (
+    _duration_seconds,
+    fetch_all_lianlian_records,
+    normalize_lianlian_record,
+    sync_xiaomi_to_database,
+)
 
 
 def test_duration_parser_supports_mm_ss_and_hh_mm_ss() -> None:
@@ -157,3 +162,45 @@ async def test_fetch_all_lianlian_records_rejects_unknown_pagination_state(monke
             end_date="20261121",
             page_size=50,
         )
+
+
+
+@pytest.mark.asyncio
+async def test_xiaomi_sync_persists_sport_detail_errors_as_partial() -> None:
+    class FakeBridge:
+        async def body_composition_history(self, **kwargs):
+            return {"data": [], "history_complete": True, "pages_fetched": 1}
+
+        async def sport_records(self, **kwargs):
+            return {
+                "records": [{"proto_type": 8, "workout_time": 123456}],
+                "count": 1,
+            }
+
+        async def history(self, relative, metric, query_date, days):
+            return {"data": []}
+
+        async def sport_detail(self, workout_time):
+            raise RuntimeError("sample unavailable")
+
+    class FakeDatabase:
+        def __init__(self):
+            self.store_kwargs = None
+
+        async def store_xiaomi(self, **kwargs):
+            self.store_kwargs = kwargs
+            return {"source": "xiaomi"}
+
+    database = FakeDatabase()
+    result = await sync_xiaomi_to_database(
+        FakeBridge(),
+        database,
+        days=1,
+        include_sport_details=True,
+    )
+
+    assert database.store_kwargs["sport_detail_errors"] == {
+        "123456": "RuntimeError"
+    }
+    assert result["status"] == "partial"
+    assert result["sport_detail_errors"] == {"123456": "RuntimeError"}
