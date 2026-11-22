@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, timezone
+import inspect
 
 import pytest
 
@@ -172,3 +173,12 @@ async def test_strength_progression_rejects_blank_exercise_name_before_database_
 async def test_cardio_analysis_rejects_invalid_period_before_database_access() -> None:
     with pytest.raises(ValueError, match="days"):
         await FitnessDatabase().cardio_analysis(days=0)
+
+
+
+def test_fat_loss_summary_session_cte_projects_filter_columns() -> None:
+    source = inspect.getsource(FitnessDatabase.fat_loss_summary)
+    sessions_cte = source.split("WITH sessions AS (", 1)[1].split(
+        "),\\n                       weekly_sessions AS", 1
+    )[0]
+    assert "source, modality, status, record_type" in sessions_cte
