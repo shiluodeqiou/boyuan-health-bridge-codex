@@ -71,3 +71,11 @@ def test_metric_summary_uses_first_last_and_recent_seven_values() -> None:
     assert summary["last"] == 76.5
     assert summary["change"] == -3.5
     assert summary["seven_day_average"] == pytest.approx(78.0)
+
+
+
+def test_strength_analytics_only_counts_explicitly_completed_sets() -> None:
+    assert "st.is_completed IS DISTINCT FROM FALSE" not in SCHEMA_SQL
+    assert "sum(st.reps) FILTER (WHERE st.is_completed IS TRUE)" in SCHEMA_SQL
+    assert "AS unknown_set_count" in SCHEMA_SQL
+    assert "AS incomplete_set_count" in SCHEMA_SQL
