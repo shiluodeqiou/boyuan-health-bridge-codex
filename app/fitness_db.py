@@ -1329,7 +1329,7 @@ class FitnessDatabase:
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """WITH daily AS (
@@ -1451,7 +1451,7 @@ class FitnessDatabase:
         if not include_details:
             summary = await self.fat_loss_summary(days)
             since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-            async with await self._connect() as conn:
+            async with self._connect() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """SELECT
@@ -1518,7 +1518,7 @@ class FitnessDatabase:
             return summary
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT day, weight_kg, bmi, body_fat_rate, fat_mass_kg,
@@ -1618,7 +1618,7 @@ class FitnessDatabase:
             raise ValueError("days 必须在 1 到 3650 之间")
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT
@@ -1781,7 +1781,7 @@ class FitnessDatabase:
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT measured_date, measured_at, segmental_metrics
@@ -1835,7 +1835,7 @@ class FitnessDatabase:
     async def sync_status(self) -> dict[str, Any]:
         """Return last successful sync, latest attempt and recent run outcomes."""
         await self.initialize()
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT s.source, s.resource, s.last_success_at, s.latest_record_at,
@@ -1899,7 +1899,7 @@ class FitnessDatabase:
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT count(*) AS records,
@@ -2018,7 +2018,7 @@ class FitnessDatabase:
             raise ValueError("exercise_name 不能为空且不能超过 120 个字符")
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT session_date, exercise_name, set_count,
@@ -2103,7 +2103,7 @@ class FitnessDatabase:
             "anaerobic": "hrm_anaerobic_duration_seconds",
             "extreme": "hrm_extreme_duration_seconds",
         }
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT COALESCE(session_date,
