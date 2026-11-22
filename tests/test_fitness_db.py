@@ -1,11 +1,14 @@
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+import asyncio
 import inspect
+import os
+from datetime import UTC, date, datetime
 
 import pytest
 
 from app.fitness_db import (
+    SCHEMA_MIGRATIONS,
     SCHEMA_SQL,
     FitnessDatabase,
     _as_date,
@@ -19,7 +22,7 @@ from app.fitness_db import (
 
 def test_parses_unix_seconds_and_timezone_aware_iso() -> None:
     assert _as_datetime(1_795_221_108) == datetime.fromtimestamp(
-        1_795_221_108, timezone.utc
+        1_795_221_108, UTC
     )
     parsed = _as_datetime("2026-11-21T08:31:48+08:00")
     assert parsed is not None
@@ -197,7 +200,7 @@ def test_workout_sample_rows_prepare_batch_and_preserve_sample_data() -> None:
 
     assert len(rows) == 2
     assert rows[0][0:3] == ("xiaomi", "1795314930", 0)
-    assert rows[0][3] == datetime.fromtimestamp(1_795_314_930, timezone.utc)
+    assert rows[0][3] == datetime.fromtimestamp(1_795_314_930, UTC)
     assert rows[0][4] == 145.0
     assert rows[0][5].obj == sample
     assert rows[1][2] == 2
@@ -255,3 +258,177 @@ def test_workout_session_schema_persists_device_heart_rate_zones() -> None:
         "hrm_extreme_duration_seconds",
     ):
         assert column in SCHEMA_SQL
+
+
+def test_schema_migrations_are_versioned_and_serialized() -> None:
+    versions = [version for version, _ in SCHEMA_MIGRATIONS]
+    assert versions == sorted(set(versions))
+    assert versions and versions[0] == 1
+    source = inspect.getsource(FitnessDatabase.initialize)
+    assert "fitness_schema_migrations" in source
+    assert "pg_advisory_xact_lock" in source
+
+
+def test_database_pool_is_bounded_and_reused() -> None:
+    source = inspect.getsource(FitnessDatabase._connect)
+    assert "AsyncConnectionPool" in source
+    assert "max_size=4" in source
+    assert "self._pool.connection()" in source
+
+
+def test_upserts_skip_unchanged_rows_and_keepstrong_writes_are_batched() -> None:
+    xiaomi = inspect.getsource(FitnessDatabase.store_xiaomi)
+    keepstrong = inspect.getsource(FitnessDatabase.store_lianlian)
+    assert xiaomi.count("IS DISTINCT FROM") >= 4
+    assert keepstrong.count("cursor.executemany") >= 5
+    assert keepstrong.count("IS DISTINCT FROM") >= 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="requires PostgreSQL integration database")
+async def test_schema_initialization_is_safe_across_database_instances() -> None:
+    first = FitnessDatabase()
+    second = FitnessDatabase()
+    try:
+        await asyncio.gather(first.initialize(), second.initialize())
+        async with first._connect() as conn:
+            cursor = await conn.execute(
+                "SELECT version FROM fitness_schema_migrations ORDER BY version"
+            )
+            assert [row[0] for row in await cursor.fetchall()] == [1]
+    finally:
+        await asyncio.gather(first.close(), second.close())
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not os.getenv("DATABASE_URL"), reason="requires PostgreSQL integration database")
+async def test_batched_sync_writes_are_idempotent() -> None:
+    database = FitnessDatabase()
+    workout_time = 1_795_314_930
+    xiaomi_payload = {
+        "days": 1,
+        "body_composition": {
+            "data": [{
+                "record_id": "body-test-1",
+                "measured_at": "2026-11-21T08:00:00+08:00",
+                "weight": 75.0,
+                "bmi": 24.9,
+                "body_fat_rate": 0.25,
+                "fat_mass": 18.75,
+                "muscle_mass": 31.0,
+            }],
+            "history_complete": True,
+        },
+        "sport_records": {
+            "records": [{
+                "workout_time": workout_time,
+                "start_time": workout_time,
+                "category": "outdoor_running",
+                "sport": "户外跑步",
+                "duration_seconds": 600,
+                "active_calories_kcal": 100,
+                "total_calories_kcal": 120,
+                "average_heart_rate_bpm": 140,
+                "maximum_heart_rate_bpm": 160,
+            }],
+            "count": 1,
+        },
+        "health_metrics": {
+            "steps": [{"time": workout_time, "steps": 1000}],
+        },
+        "sport_details": {
+            str(workout_time): {
+                "samples": [{"time": workout_time, "heart_rate_bpm": 120}],
+            },
+        },
+    }
+    try:
+        first_xiaomi = await database.store_xiaomi(**xiaomi_payload)
+        second_xiaomi = await database.store_xiaomi(**xiaomi_payload)
+        changed_body = {
+            **xiaomi_payload["body_composition"],
+            "data": [{
+                **xiaomi_payload["body_composition"]["data"][0],
+                "weight": 74.8,
+            }],
+        }
+        changed_xiaomi = await database.store_xiaomi(
+            **{**xiaomi_payload, "body_composition": changed_body}
+        )
+
+        assert first_xiaomi["body_measurements_upserted"] == 1
+        assert first_xiaomi["workout_sessions_upserted"] == 1
+        assert first_xiaomi["health_metric_rows_upserted"] == 1
+        assert first_xiaomi["workout_samples_upserted"] == 1
+        assert second_xiaomi["body_measurements_upserted"] == 0
+        assert second_xiaomi["workout_sessions_upserted"] == 0
+        assert second_xiaomi["health_metric_rows_upserted"] == 0
+        assert second_xiaomi["workout_samples_upserted"] == 0
+        assert changed_xiaomi["body_measurements_upserted"] == 1
+        assert changed_xiaomi["workout_sessions_upserted"] == 0
+        assert changed_xiaomi["health_metric_rows_upserted"] == 0
+        assert changed_xiaomi["workout_samples_upserted"] == 0
+
+        keepstrong_payload = [{
+            "id": "normal:test-session",
+            "date": "20261121",
+            "name": "胸部训练",
+            "record_type": "strength",
+            "training_type": "normal",
+            "status": "completed",
+            "duration_seconds": 3600,
+            "calories_kcal": 200,
+            "training_capacity": 1000,
+            "exercises": [{
+                "name": "器械推胸",
+                "weight_unit": "kg",
+                "sets": [{
+                    "weight_value": 30,
+                    "weight_unit": "kg",
+                    "weight_kg": 30,
+                    "reps": 12,
+                    "is_completed": True,
+                    "raw_data": {"weight": "30", "reps": "12", "isDone": True},
+                }],
+            }],
+        }]
+        first_keepstrong = await database.store_lianlian(keepstrong_payload)
+        second_keepstrong = await database.store_lianlian(keepstrong_payload)
+
+        assert first_keepstrong["strength_sessions_upserted"] == 1
+        assert first_keepstrong["exercises_upserted"] == 1
+        assert first_keepstrong["sets_upserted"] == 1
+        assert second_keepstrong["strength_sessions_upserted"] == 0
+        assert second_keepstrong["exercises_upserted"] == 0
+        assert second_keepstrong["sets_upserted"] == 0
+
+        async with database._connect() as conn:
+            migration = await conn.execute(
+                "SELECT version FROM fitness_schema_migrations ORDER BY version"
+            )
+            assert [row[0] for row in await migration.fetchall()] == [1]
+            counts = await conn.execute(
+                """SELECT
+                     (SELECT count(*) FROM fitness_body_measurements WHERE source='xiaomi'),
+                     (SELECT count(*) FROM fitness_health_metrics WHERE source='xiaomi'),
+                     (SELECT count(*) FROM fitness_workout_sessions WHERE source='xiaomi'),
+                     (SELECT count(*) FROM fitness_workout_samples WHERE source='xiaomi'),
+                     (SELECT count(*) FROM fitness_workout_sessions WHERE source='lianlian'),
+                     (SELECT count(*) FROM fitness_strength_exercises WHERE source='lianlian'),
+                     (SELECT count(*) FROM fitness_strength_sets WHERE source='lianlian')"""
+            )
+            assert await counts.fetchone() == (1, 1, 1, 1, 1, 1, 1)
+            updated_weight = await conn.execute(
+                """SELECT weight_kg FROM fitness_body_measurements
+                   WHERE source='xiaomi' AND source_record_id='body-test-1'"""
+            )
+            assert (await updated_weight.fetchone())[0] == pytest.approx(74.8)
+            run_counts = await conn.execute(
+                """SELECT source, records_written FROM fitness_sync_runs
+                   WHERE id IN (%s, %s)
+                   ORDER BY source""",
+                (second_xiaomi["sync_run_id"], second_keepstrong["sync_run_id"]),
+            )
+            assert await run_counts.fetchall() == [("lianlian", 0), ("xiaomi", 0)]
+    finally:
+        await database.close()

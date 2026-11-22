@@ -505,7 +505,10 @@ mcp_app = mcp.streamable_http_app(
 @contextlib.asynccontextmanager
 async def lifespan(_: Starlette):
     async with mcp.session_manager.run():
-        yield
+        try:
+            yield
+        finally:
+            await fitness_database.close()
 
 
 app = Starlette(

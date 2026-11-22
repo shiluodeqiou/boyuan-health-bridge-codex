@@ -4,11 +4,12 @@ import asyncio
 import hashlib
 import json
 import os
-from datetime import date, datetime, time, timedelta, timezone
+from contextlib import asynccontextmanager
+from datetime import UTC, date, datetime, time, timedelta, timezone
 from typing import Any
 
-import psycopg
 from psycopg.types.json import Jsonb
+from psycopg_pool import AsyncConnectionPool
 
 CN_TZ = timezone(timedelta(hours=8))
 
@@ -454,6 +455,10 @@ GROUP BY 1, e.exercise_name;
 
 """
 
+
+SCHEMA_MIGRATIONS = ((1, SCHEMA_SQL),)
+
+
 def _database_url() -> str:
     value = os.getenv("DATABASE_URL", "").strip()
     if not value:
@@ -475,7 +480,7 @@ def _as_datetime(value: Any) -> datetime | None:
         return None
     if isinstance(value, (int, float)):
         try:
-            return datetime.fromtimestamp(float(value), timezone.utc)
+            return datetime.fromtimestamp(float(value), UTC)
         except (OverflowError, OSError, ValueError):
             return None
     if isinstance(value, str):
@@ -609,17 +614,38 @@ class FitnessDatabase:
     """Persistent PostgreSQL store for normalized fitness data and original payloads."""
 
     def __init__(self) -> None:
-        # Schema migration is expensive on a remote Neon connection.  Keep it out of
-        # every read request, while still serializing the first concurrent request.
         self._initialized = False
         self._initialize_lock = asyncio.Lock()
+        self._pool_lock = asyncio.Lock()
+        self._pool: AsyncConnectionPool | None = None
 
     @property
     def configured(self) -> bool:
         return bool(os.getenv("DATABASE_URL", "").strip())
 
-    async def _connect(self) -> psycopg.AsyncConnection:
-        return await psycopg.AsyncConnection.connect(_database_url())
+    @asynccontextmanager
+    async def _connect(self):
+        if self._pool is None:
+            async with self._pool_lock:
+                if self._pool is None:
+                    pool = AsyncConnectionPool(
+                        conninfo=_database_url(),
+                        min_size=1,
+                        max_size=4,
+                        timeout=15,
+                        open=False,
+                    )
+                    await pool.open(wait=True)
+                    self._pool = pool
+        assert self._pool is not None
+        async with self._pool.connection() as conn:
+            yield conn
+
+    async def close(self) -> None:
+        async with self._pool_lock:
+            if self._pool is not None:
+                await self._pool.close()
+                self._pool = None
 
     async def initialize(self) -> None:
         if self._initialized:
@@ -627,11 +653,31 @@ class FitnessDatabase:
         async with self._initialize_lock:
             if self._initialized:
                 return
-            async with await self._connect() as conn:
+            async with self._connect() as conn:
                 async with conn.transaction():
-                    for statement in SCHEMA_SQL.split(";"):
-                        if statement.strip():
-                            await conn.execute(statement)
+                    await conn.execute(
+                        "SELECT pg_advisory_xact_lock(hashtext('boyuan-health-bridge-schema'))"
+                    )
+                    await conn.execute(
+                        """CREATE TABLE IF NOT EXISTS fitness_schema_migrations (
+                             version INTEGER PRIMARY KEY,
+                             applied_at TIMESTAMPTZ NOT NULL DEFAULT clock_timestamp()
+                           )"""
+                    )
+                    for version, migration_sql in SCHEMA_MIGRATIONS:
+                        cursor = await conn.execute(
+                            "SELECT 1 FROM fitness_schema_migrations WHERE version=%s",
+                            (version,),
+                        )
+                        if await cursor.fetchone():
+                            continue
+                        for statement in migration_sql.split(";"):
+                            if statement.strip():
+                                await conn.execute(statement)
+                        await conn.execute(
+                            "INSERT INTO fitness_schema_migrations (version) VALUES (%s)",
+                            (version,),
+                        )
             self._initialized = True
 
     async def store_xiaomi(
@@ -644,6 +690,7 @@ class FitnessDatabase:
         sport_details: dict[str, dict[str, Any]] | None = None,
         sport_detail_errors: dict[str, str] | None = None,
     ) -> dict[str, Any]:
+        """Batch and idempotently store Xiaomi body, health, and workout data."""
         await self.initialize()
         source = "xiaomi"
         resource = "personal_fitness"
@@ -655,14 +702,109 @@ class FitnessDatabase:
             "partial"
             if body_composition.get("history_complete") is False
             or any(not isinstance(rows, list) for rows in health_metrics.values())
+            or bool(sport_records.get("notes"))
             or bool(detail_errors)
             else "success"
         )
-        run_id: int | None = None
         body_written = workout_written = metric_written = sample_written = 0
-        now = datetime.now(timezone.utc)
+        records_seen = (
+            len(body_rows) + len(workout_rows)
+            + sum(len(rows) for rows in health_metrics.values() if isinstance(rows, list))
+        )
+        now = datetime.now(UTC)
 
-        async with await self._connect() as conn:
+        body_params: list[tuple[Any, ...]] = []
+        for row in body_rows:
+            if not isinstance(row, dict):
+                continue
+            measured_at = _record_time(row)
+            if measured_at is None:
+                continue
+            record_id = _source_id(row, ("record_id", "id", "sid"))
+            segmental = {
+                key: value for key, value in row.items()
+                if key.startswith((
+                    "left_", "right_", "trunk_", "limbs_", "upper_limb_", "lower_limb_"
+                ))
+            }
+            body_params.append((
+                source, record_id, measured_at, measured_at.astimezone(CN_TZ).date(),
+                _float_or_none(row.get("weight")),
+                _float_or_none(row.get("bmi")),
+                _float_or_none(row.get("body_fat_rate")),
+                _float_or_none(row.get("fat_mass")),
+                _float_or_none(row.get("muscle_mass")),
+                _float_or_none(row.get("skeletal_muscle_mass")),
+                _int_or_none(row.get("body_age")),
+                _int_or_none(row.get("body_score")),
+                _float_or_none(row.get("bone_mass")),
+                _float_or_none(row.get("protein_mass")),
+                _float_or_none(row.get("body_moisture_mass")),
+                _float_or_none(row.get("fat_free_mass")),
+                _float_or_none(row.get("visceral_fat")),
+                _float_or_none(row.get("basal_metabolism")),
+                _float_or_none(row.get("whr")),
+                _float_or_none(row.get("moisture_rate")),
+                _float_or_none(row.get("protein_rate")),
+                Jsonb(segmental), Jsonb(row),
+            ))
+
+        metric_params: list[tuple[Any, ...]] = []
+        for metric, rows in health_metrics.items():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                if not isinstance(row, dict):
+                    continue
+                recorded_at = _record_time(row)
+                if recorded_at is None:
+                    continue
+                metric_params.append((
+                    source, metric, recorded_at, recorded_at.astimezone(CN_TZ).date(),
+                    _json_hash(row), Jsonb(row),
+                ))
+
+        workout_params: list[tuple[Any, ...]] = []
+        sample_rows: list[tuple[Any, ...]] = []
+        for row in workout_rows:
+            if not isinstance(row, dict):
+                continue
+            external_id = _source_id(row, ("workout_time", "id", "record_id"))
+            started_at = _record_time(row)
+            ended_at = _as_datetime(row.get("end_time"))
+            detail = details.get(external_id) or details.get(str(row.get("workout_time")))
+            zone_durations = (
+                _workout_zone_durations(detail) if isinstance(detail, dict) else None
+            )
+            zone_values = zone_durations or {}
+            workout_params.append((
+                source, external_id, row.get("category"), row.get("sport"),
+                started_at, ended_at, _int_or_none(row.get("duration_seconds")),
+                _float_or_none(row.get("active_calories_kcal")),
+                _float_or_none(row.get("total_calories_kcal")),
+                _float_or_none(row.get("average_heart_rate_bpm")),
+                _float_or_none(row.get("maximum_heart_rate_bpm")),
+                zone_values.get("hrm_warmup_duration_seconds"),
+                zone_values.get("hrm_fat_burning_duration_seconds"),
+                zone_values.get("hrm_aerobic_duration_seconds"),
+                zone_values.get("hrm_anaerobic_duration_seconds"),
+                zone_values.get("hrm_extreme_duration_seconds"),
+                started_at.astimezone(CN_TZ).date() if started_at else None,
+                "strength" if row.get("category") in (
+                    "strength_training", "free_training"
+                ) else "cardio",
+                Jsonb(row),
+            ))
+            if isinstance(detail, dict):
+                sample_rows.extend(_workout_sample_rows(source, external_id, detail))
+
+        latest_times = [
+            _record_time(row) for row in body_rows + workout_rows if isinstance(row, dict)
+        ]
+        latest_times = [value for value in latest_times if value is not None]
+        latest_record_at = max(latest_times) if latest_times else None
+
+        async with self._connect() as conn:
             async with conn.transaction():
                 cursor = await conn.execute(
                     """INSERT INTO fitness_sync_runs (source, resource, status, details)
@@ -671,183 +813,172 @@ class FitnessDatabase:
                 )
                 run_id = (await cursor.fetchone())[0]
 
-                for row in body_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    measured_at = _record_time(row)
-                    if measured_at is None:
-                        continue
-                    record_id = _source_id(row, ("record_id", "id", "sid"))
-                    await conn.execute(
-                        """INSERT INTO fitness_body_measurements
-                           (source, source_record_id, measured_at, measured_date,
-                            weight_kg, bmi, body_fat_rate, fat_mass_kg,
-                            muscle_mass_kg, skeletal_muscle_mass_kg, body_age, body_score,
-                            bone_mass_kg, protein_mass_kg, body_water_mass_kg, fat_free_mass_kg,
-                            visceral_fat_level, basal_metabolism_kcal, waist_hip_ratio,
-                            moisture_rate_percent, protein_rate_percent, segmental_metrics, raw_data)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT (source, source_record_id, measured_at)
-                           DO UPDATE SET
-                             measured_date=EXCLUDED.measured_date,
-                             weight_kg=EXCLUDED.weight_kg,
-                             bmi=EXCLUDED.bmi,
-                             body_fat_rate=EXCLUDED.body_fat_rate,
-                             fat_mass_kg=EXCLUDED.fat_mass_kg,
-                             muscle_mass_kg=EXCLUDED.muscle_mass_kg,
-                             skeletal_muscle_mass_kg=EXCLUDED.skeletal_muscle_mass_kg,
-                             body_age=EXCLUDED.body_age,
-                             body_score=EXCLUDED.body_score,
-                             bone_mass_kg=EXCLUDED.bone_mass_kg,
-                             protein_mass_kg=EXCLUDED.protein_mass_kg,
-                             body_water_mass_kg=EXCLUDED.body_water_mass_kg,
-                             fat_free_mass_kg=EXCLUDED.fat_free_mass_kg,
-                             visceral_fat_level=EXCLUDED.visceral_fat_level,
-                             basal_metabolism_kcal=EXCLUDED.basal_metabolism_kcal,
-                             waist_hip_ratio=EXCLUDED.waist_hip_ratio,
-                             moisture_rate_percent=EXCLUDED.moisture_rate_percent,
-                             protein_rate_percent=EXCLUDED.protein_rate_percent,
-                             segmental_metrics=EXCLUDED.segmental_metrics,
-                             raw_data=EXCLUDED.raw_data,
-                             updated_at=now()""",
-                        (
-                            source, record_id, measured_at, measured_at.astimezone(CN_TZ).date(),
-                            _float_or_none(row.get("weight")),
-                            _float_or_none(row.get("bmi")),
-                            _float_or_none(row.get("body_fat_rate")),
-                            _float_or_none(row.get("fat_mass")),
-                            _float_or_none(row.get("muscle_mass")),
-                            _float_or_none(row.get("skeletal_muscle_mass")),
-                            _int_or_none(row.get("body_age")),
-                            _int_or_none(row.get("body_score")),
-                            _float_or_none(row.get("bone_mass")),
-                            _float_or_none(row.get("protein_mass")),
-                            _float_or_none(row.get("body_moisture_mass")),
-                            _float_or_none(row.get("fat_free_mass")),
-                            _float_or_none(row.get("visceral_fat")),
-                            _float_or_none(row.get("basal_metabolism")),
-                            _float_or_none(row.get("whr")),
-                            _float_or_none(row.get("moisture_rate")),
-                            _float_or_none(row.get("protein_rate")),
-                            Jsonb({k: v for k, v in row.items() if k.startswith(
-                                ("left_", "right_", "trunk_", "limbs_", "upper_limb_", "lower_limb_")
-                            )}),
-                            Jsonb(row),
-                        ),
-                    )
-                    body_written += 1
+                body_sql = """INSERT INTO fitness_body_measurements
+                    (source, source_record_id, measured_at, measured_date,
+                     weight_kg, bmi, body_fat_rate, fat_mass_kg,
+                     muscle_mass_kg, skeletal_muscle_mass_kg, body_age, body_score,
+                     bone_mass_kg, protein_mass_kg, body_water_mass_kg, fat_free_mass_kg,
+                     visceral_fat_level, basal_metabolism_kcal, waist_hip_ratio,
+                     moisture_rate_percent, protein_rate_percent, segmental_metrics, raw_data)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, source_record_id, measured_at)
+                    DO UPDATE SET measured_date=EXCLUDED.measured_date,
+                      weight_kg=EXCLUDED.weight_kg, bmi=EXCLUDED.bmi,
+                      body_fat_rate=EXCLUDED.body_fat_rate, fat_mass_kg=EXCLUDED.fat_mass_kg,
+                      muscle_mass_kg=EXCLUDED.muscle_mass_kg,
+                      skeletal_muscle_mass_kg=EXCLUDED.skeletal_muscle_mass_kg,
+                      body_age=EXCLUDED.body_age, body_score=EXCLUDED.body_score,
+                      bone_mass_kg=EXCLUDED.bone_mass_kg,
+                      protein_mass_kg=EXCLUDED.protein_mass_kg,
+                      body_water_mass_kg=EXCLUDED.body_water_mass_kg,
+                      fat_free_mass_kg=EXCLUDED.fat_free_mass_kg,
+                      visceral_fat_level=EXCLUDED.visceral_fat_level,
+                      basal_metabolism_kcal=EXCLUDED.basal_metabolism_kcal,
+                      waist_hip_ratio=EXCLUDED.waist_hip_ratio,
+                      moisture_rate_percent=EXCLUDED.moisture_rate_percent,
+                      protein_rate_percent=EXCLUDED.protein_rate_percent,
+                      segmental_metrics=EXCLUDED.segmental_metrics,
+                      raw_data=EXCLUDED.raw_data, updated_at=now()
+                    WHERE (
+                      fitness_body_measurements.measured_date,
+                      fitness_body_measurements.weight_kg, fitness_body_measurements.bmi,
+                      fitness_body_measurements.body_fat_rate,
+                      fitness_body_measurements.fat_mass_kg,
+                      fitness_body_measurements.muscle_mass_kg,
+                      fitness_body_measurements.skeletal_muscle_mass_kg,
+                      fitness_body_measurements.body_age, fitness_body_measurements.body_score,
+                      fitness_body_measurements.bone_mass_kg,
+                      fitness_body_measurements.protein_mass_kg,
+                      fitness_body_measurements.body_water_mass_kg,
+                      fitness_body_measurements.fat_free_mass_kg,
+                      fitness_body_measurements.visceral_fat_level,
+                      fitness_body_measurements.basal_metabolism_kcal,
+                      fitness_body_measurements.waist_hip_ratio,
+                      fitness_body_measurements.moisture_rate_percent,
+                      fitness_body_measurements.protein_rate_percent,
+                      fitness_body_measurements.segmental_metrics,
+                      fitness_body_measurements.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.measured_date, EXCLUDED.weight_kg, EXCLUDED.bmi,
+                      EXCLUDED.body_fat_rate, EXCLUDED.fat_mass_kg,
+                      EXCLUDED.muscle_mass_kg, EXCLUDED.skeletal_muscle_mass_kg,
+                      EXCLUDED.body_age, EXCLUDED.body_score, EXCLUDED.bone_mass_kg,
+                      EXCLUDED.protein_mass_kg, EXCLUDED.body_water_mass_kg,
+                      EXCLUDED.fat_free_mass_kg, EXCLUDED.visceral_fat_level,
+                      EXCLUDED.basal_metabolism_kcal, EXCLUDED.waist_hip_ratio,
+                      EXCLUDED.moisture_rate_percent, EXCLUDED.protein_rate_percent,
+                      EXCLUDED.segmental_metrics, EXCLUDED.raw_data
+                    )"""
+                metric_sql = """INSERT INTO fitness_health_metrics
+                    (source, metric, recorded_at, recorded_date, record_hash, raw_data)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, metric, recorded_date)
+                    DO UPDATE SET recorded_at=EXCLUDED.recorded_at,
+                      record_hash=EXCLUDED.record_hash, raw_data=EXCLUDED.raw_data,
+                      updated_at=now()
+                    WHERE (
+                      fitness_health_metrics.recorded_at,
+                      fitness_health_metrics.record_hash,
+                      fitness_health_metrics.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.recorded_at, EXCLUDED.record_hash, EXCLUDED.raw_data
+                    )"""
+                workout_sql = """INSERT INTO fitness_workout_sessions
+                    (source, external_id, category, sport_name, started_at, ended_at,
+                     duration_seconds, active_calories_kcal, total_calories_kcal,
+                     average_heart_rate_bpm, maximum_heart_rate_bpm,
+                     hrm_warmup_duration_seconds, hrm_fat_burning_duration_seconds,
+                     hrm_aerobic_duration_seconds, hrm_anaerobic_duration_seconds,
+                     hrm_extreme_duration_seconds, session_date, modality, raw_data)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, external_id)
+                    DO UPDATE SET category=EXCLUDED.category, sport_name=EXCLUDED.sport_name,
+                      started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at,
+                      duration_seconds=EXCLUDED.duration_seconds,
+                      active_calories_kcal=EXCLUDED.active_calories_kcal,
+                      total_calories_kcal=EXCLUDED.total_calories_kcal,
+                      average_heart_rate_bpm=EXCLUDED.average_heart_rate_bpm,
+                      maximum_heart_rate_bpm=EXCLUDED.maximum_heart_rate_bpm,
+                      hrm_warmup_duration_seconds=COALESCE(
+                        EXCLUDED.hrm_warmup_duration_seconds,
+                        fitness_workout_sessions.hrm_warmup_duration_seconds),
+                      hrm_fat_burning_duration_seconds=COALESCE(
+                        EXCLUDED.hrm_fat_burning_duration_seconds,
+                        fitness_workout_sessions.hrm_fat_burning_duration_seconds),
+                      hrm_aerobic_duration_seconds=COALESCE(
+                        EXCLUDED.hrm_aerobic_duration_seconds,
+                        fitness_workout_sessions.hrm_aerobic_duration_seconds),
+                      hrm_anaerobic_duration_seconds=COALESCE(
+                        EXCLUDED.hrm_anaerobic_duration_seconds,
+                        fitness_workout_sessions.hrm_anaerobic_duration_seconds),
+                      hrm_extreme_duration_seconds=COALESCE(
+                        EXCLUDED.hrm_extreme_duration_seconds,
+                        fitness_workout_sessions.hrm_extreme_duration_seconds),
+                      session_date=EXCLUDED.session_date, modality=EXCLUDED.modality,
+                      raw_data=EXCLUDED.raw_data, updated_at=now()
+                    WHERE (
+                      fitness_workout_sessions.category, fitness_workout_sessions.sport_name,
+                      fitness_workout_sessions.started_at, fitness_workout_sessions.ended_at,
+                      fitness_workout_sessions.duration_seconds,
+                      fitness_workout_sessions.active_calories_kcal,
+                      fitness_workout_sessions.total_calories_kcal,
+                      fitness_workout_sessions.average_heart_rate_bpm,
+                      fitness_workout_sessions.maximum_heart_rate_bpm,
+                      fitness_workout_sessions.hrm_warmup_duration_seconds,
+                      fitness_workout_sessions.hrm_fat_burning_duration_seconds,
+                      fitness_workout_sessions.hrm_aerobic_duration_seconds,
+                      fitness_workout_sessions.hrm_anaerobic_duration_seconds,
+                      fitness_workout_sessions.hrm_extreme_duration_seconds,
+                      fitness_workout_sessions.session_date,
+                      fitness_workout_sessions.modality, fitness_workout_sessions.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.category, EXCLUDED.sport_name, EXCLUDED.started_at,
+                      EXCLUDED.ended_at, EXCLUDED.duration_seconds,
+                      EXCLUDED.active_calories_kcal, EXCLUDED.total_calories_kcal,
+                      EXCLUDED.average_heart_rate_bpm, EXCLUDED.maximum_heart_rate_bpm,
+                      COALESCE(EXCLUDED.hrm_warmup_duration_seconds,
+                        fitness_workout_sessions.hrm_warmup_duration_seconds),
+                      COALESCE(EXCLUDED.hrm_fat_burning_duration_seconds,
+                        fitness_workout_sessions.hrm_fat_burning_duration_seconds),
+                      COALESCE(EXCLUDED.hrm_aerobic_duration_seconds,
+                        fitness_workout_sessions.hrm_aerobic_duration_seconds),
+                      COALESCE(EXCLUDED.hrm_anaerobic_duration_seconds,
+                        fitness_workout_sessions.hrm_anaerobic_duration_seconds),
+                      COALESCE(EXCLUDED.hrm_extreme_duration_seconds,
+                        fitness_workout_sessions.hrm_extreme_duration_seconds),
+                      EXCLUDED.session_date, EXCLUDED.modality, EXCLUDED.raw_data
+                    )"""
+                sample_sql = """INSERT INTO fitness_workout_samples
+                    (source, external_id, sample_index, recorded_at, heart_rate_bpm, raw_data)
+                    VALUES (%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, external_id, sample_index)
+                    DO UPDATE SET recorded_at=EXCLUDED.recorded_at,
+                      heart_rate_bpm=EXCLUDED.heart_rate_bpm, raw_data=EXCLUDED.raw_data
+                    WHERE (
+                      fitness_workout_samples.recorded_at,
+                      fitness_workout_samples.heart_rate_bpm,
+                      fitness_workout_samples.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.recorded_at, EXCLUDED.heart_rate_bpm, EXCLUDED.raw_data
+                    )"""
 
-                for metric, rows in health_metrics.items():
-                    if not isinstance(rows, list):
-                        continue
-                    for row in rows:
-                        if not isinstance(row, dict):
-                            continue
-                        recorded_at = _record_time(row)
-                        if recorded_at is None:
-                            continue
-                        await conn.execute(
-                            """INSERT INTO fitness_health_metrics
-                               (source, metric, recorded_at, recorded_date, record_hash, raw_data)
-                               VALUES (%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT (source, metric, recorded_date)
-                               DO UPDATE SET recorded_at=EXCLUDED.recorded_at,
-                                 record_hash=EXCLUDED.record_hash,
-                                 raw_data=EXCLUDED.raw_data, updated_at=now()""",
-                            (
-                                source, metric, recorded_at, recorded_at.astimezone(CN_TZ).date(),
-                                _json_hash(row), Jsonb(row),
-                            ),
-                        )
-                        metric_written += 1
-
-                sample_rows: list[tuple[Any, ...]] = []
-                for row in workout_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    external_id = _source_id(row, ("workout_time", "id", "record_id"))
-                    started_at = _record_time(row)
-                    ended_at = _as_datetime(row.get("end_time"))
-                    detail = details.get(external_id) or details.get(str(row.get("workout_time")))
-                    zone_durations = (
-                        _workout_zone_durations(detail) if isinstance(detail, dict) else None
-                    )
-                    zone_values = zone_durations or {}
-                    await conn.execute(
-                        """INSERT INTO fitness_workout_sessions
-                           (source, external_id, category, sport_name, started_at, ended_at,
-                            duration_seconds, active_calories_kcal, total_calories_kcal,
-                            average_heart_rate_bpm, maximum_heart_rate_bpm,
-                            hrm_warmup_duration_seconds, hrm_fat_burning_duration_seconds,
-                            hrm_aerobic_duration_seconds, hrm_anaerobic_duration_seconds,
-                            hrm_extreme_duration_seconds, session_date, modality, raw_data)
-                           VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT (source, external_id)
-                           DO UPDATE SET category=EXCLUDED.category, sport_name=EXCLUDED.sport_name,
-                             started_at=EXCLUDED.started_at, ended_at=EXCLUDED.ended_at,
-                             duration_seconds=EXCLUDED.duration_seconds,
-                             active_calories_kcal=EXCLUDED.active_calories_kcal,
-                             total_calories_kcal=EXCLUDED.total_calories_kcal,
-                             average_heart_rate_bpm=EXCLUDED.average_heart_rate_bpm,
-                             maximum_heart_rate_bpm=EXCLUDED.maximum_heart_rate_bpm,
-                             hrm_warmup_duration_seconds=COALESCE(
-                               EXCLUDED.hrm_warmup_duration_seconds,
-                               fitness_workout_sessions.hrm_warmup_duration_seconds),
-                             hrm_fat_burning_duration_seconds=COALESCE(
-                               EXCLUDED.hrm_fat_burning_duration_seconds,
-                               fitness_workout_sessions.hrm_fat_burning_duration_seconds),
-                             hrm_aerobic_duration_seconds=COALESCE(
-                               EXCLUDED.hrm_aerobic_duration_seconds,
-                               fitness_workout_sessions.hrm_aerobic_duration_seconds),
-                             hrm_anaerobic_duration_seconds=COALESCE(
-                               EXCLUDED.hrm_anaerobic_duration_seconds,
-                               fitness_workout_sessions.hrm_anaerobic_duration_seconds),
-                             hrm_extreme_duration_seconds=COALESCE(
-                               EXCLUDED.hrm_extreme_duration_seconds,
-                               fitness_workout_sessions.hrm_extreme_duration_seconds),
-                             session_date=EXCLUDED.session_date, modality=EXCLUDED.modality,
-                             raw_data=EXCLUDED.raw_data, updated_at=now()""",
-                        (
-                            source, external_id, row.get("category"), row.get("sport"),
-                            started_at, ended_at, _int_or_none(row.get("duration_seconds")),
-                            _float_or_none(row.get("active_calories_kcal")),
-                            _float_or_none(row.get("total_calories_kcal")),
-                            _float_or_none(row.get("average_heart_rate_bpm")),
-                            _float_or_none(row.get("maximum_heart_rate_bpm")),
-                            zone_values.get("hrm_warmup_duration_seconds"),
-                            zone_values.get("hrm_fat_burning_duration_seconds"),
-                            zone_values.get("hrm_aerobic_duration_seconds"),
-                            zone_values.get("hrm_anaerobic_duration_seconds"),
-                            zone_values.get("hrm_extreme_duration_seconds"),
-                            started_at.astimezone(CN_TZ).date() if started_at else None,
-                            "strength" if row.get("category") in ("strength_training", "free_training") else "cardio",
-                            Jsonb(row),
-                        ),
-                    )
-                    workout_written += 1
-
-                    if isinstance(detail, dict):
-                        sample_rows.extend(_workout_sample_rows(source, external_id, detail))
-
+                if body_params:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(body_sql, body_params)
+                        body_written = max(cursor.rowcount, 0)
+                if metric_params:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(metric_sql, metric_params)
+                        metric_written = max(cursor.rowcount, 0)
+                if workout_params:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(workout_sql, workout_params)
+                        workout_written = max(cursor.rowcount, 0)
                 if sample_rows:
-                    async with conn.cursor() as sample_cursor:
-                        await sample_cursor.executemany(
-                            """INSERT INTO fitness_workout_samples
-                               (source, external_id, sample_index, recorded_at, heart_rate_bpm, raw_data)
-                               VALUES (%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT (source, external_id, sample_index)
-                               DO UPDATE SET recorded_at=EXCLUDED.recorded_at,
-                                 heart_rate_bpm=EXCLUDED.heart_rate_bpm,
-                                 raw_data=EXCLUDED.raw_data""",
-                            sample_rows,
-                        )
-                    sample_written = len(sample_rows)
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(sample_sql, sample_rows)
+                        sample_written = max(cursor.rowcount, 0)
 
-                latest_times = [
-                    _record_time(row) for row in body_rows + workout_rows if isinstance(row, dict)
-                ]
-                latest_times = [value for value in latest_times if value is not None]
-                latest_record_at = max(latest_times) if latest_times else None
                 await conn.execute(
                     """INSERT INTO fitness_sync_state
                        (source, resource, last_success_at, latest_record_at, records_seen)
@@ -859,14 +990,16 @@ class FitnessDatabase:
                          latest_record_at=COALESCE(EXCLUDED.latest_record_at,
                                                     fitness_sync_state.latest_record_at),
                          records_seen=EXCLUDED.records_seen""",
-                    (source, resource, now if sync_status == "success" else None, latest_record_at, len(body_rows) + len(workout_rows)),
+                    (
+                        source, resource, now if sync_status == "success" else None,
+                        latest_record_at, records_seen,
+                    ),
                 )
                 await conn.execute(
-                    """UPDATE fitness_sync_runs SET status=%s, finished_at=now(),
+                    """UPDATE fitness_sync_runs SET status=%s, finished_at=clock_timestamp(),
                        records_seen=%s, records_written=%s, details=%s WHERE id=%s""",
                     (
-                        sync_status,
-                        len(body_rows) + len(workout_rows) + metric_written,
+                        sync_status, records_seen,
                         body_written + workout_written + metric_written + sample_written,
                         Jsonb({
                             "days": days,
@@ -874,6 +1007,7 @@ class FitnessDatabase:
                             "workout_sessions": workout_written,
                             "health_metric_rows": metric_written,
                             "workout_samples": sample_written,
+                            "sport_record_notes": sport_records.get("notes", []),
                             "health_metric_errors": [
                                 key for key, rows in health_metrics.items()
                                 if not isinstance(rows, list)
@@ -902,13 +1036,103 @@ class FitnessDatabase:
         self,
         records: list[dict[str, Any]],
     ) -> dict[str, Any]:
-        """Idempotently mirror normalized KeepStrong records and exact source JSON."""
+        """Batch and idempotently mirror KeepStrong records and exact source JSON."""
         await self.initialize()
         source = "lianlian"
         sessions_written = exercises_written = sets_written = 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
+        session_rows: list[tuple[Any, ...]] = []
+        exercise_rows: list[tuple[Any, ...]] = []
+        set_rows: list[tuple[Any, ...]] = []
+        set_delete_rows: list[tuple[Any, ...]] = []
+        exercise_delete_rows: list[tuple[Any, ...]] = []
 
-        async with await self._connect() as conn:
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            external_id = _source_id(record, ("id", "record_id", "workout_id", "session_id"))
+            session_date = _as_date(
+                record.get("session_date") or record.get("date") or record.get("dayStr")
+            )
+            if session_date is None:
+                raise ValueError(f"练练训练记录 {external_id} 缺少有效日期")
+            started_at = _as_datetime(record.get("started_at"))
+            ended_at = _as_datetime(record.get("ended_at") or record.get("end_time"))
+            source_raw = record.get("raw_data", record)
+            metadata = record.get("source_metadata") or {}
+            session_rows.append((
+                source, external_id, str(record.get("name") or "力量训练"),
+                started_at, ended_at, _int_or_none(record.get("duration_seconds")),
+                _float_or_none(record.get("average_heart_rate_bpm")), session_date,
+                record.get("record_type"), record.get("training_type"), record.get("status"),
+                _float_or_none(record.get("calories_kcal")),
+                _float_or_none(record.get("training_capacity")), Jsonb(metadata), Jsonb(source_raw),
+            ))
+
+            exercises = record.get("exercises", [])
+            if not isinstance(exercises, list):
+                raise ValueError(f"练练训练记录 {external_id} 的 exercises 不是数组")
+            for exercise_index, exercise in enumerate(exercises):
+                if not isinstance(exercise, dict):
+                    continue
+                exercise_name = str(
+                    exercise.get("name") or exercise.get("exercise_name") or ""
+                ).strip()
+                if not exercise_name:
+                    raise ValueError(
+                        f"练练训练记录 {external_id} 的第 {exercise_index + 1} 个动作缺少名称"
+                    )
+                exercise_raw = exercise.get("raw_data", exercise)
+                weight_unit = exercise.get("weight_unit")
+                exercise_rows.append((
+                    source, external_id, exercise_index, exercise_name,
+                    exercise.get("body_part"), exercise.get("action_id"), weight_unit,
+                    _float_or_none(exercise.get("capacity")),
+                    _int_or_none(exercise.get("planned_rest_seconds")),
+                    Jsonb(exercise.get("weight_tag") or {}),
+                    Jsonb(exercise.get("comb_actions") or []), Jsonb(exercise_raw),
+                ))
+
+                sets = exercise.get("sets", [])
+                if not isinstance(sets, list):
+                    raise ValueError(f"动作 {exercise_name} 的 sets 不是数组")
+                for set_index, set_row in enumerate(sets):
+                    if not isinstance(set_row, dict):
+                        continue
+                    set_raw = set_row.get("raw_data", set_row)
+                    set_unit = set_row.get("weight_unit") or weight_unit
+                    weight_value = _float_or_none(set_row.get("weight_value"))
+                    if weight_value is None:
+                        weight_value = _float_or_none(set_row.get("weight_kg"))
+                    weight_kg = (
+                        _float_or_none(set_row.get("weight_kg"))
+                        if str(set_unit or "").lower() == "kg" else None
+                    )
+                    completed = set_row.get("is_completed")
+                    if not isinstance(completed, bool):
+                        completed = None
+                    heart_rate_data = (
+                        Jsonb(set_row.get("heart_rate_data"))
+                        if set_row.get("heart_rate_data") is not None else None
+                    )
+                    set_rows.append((
+                        source, external_id, exercise_index, set_index, weight_kg,
+                        _int_or_none(set_row.get("reps")),
+                        _int_or_none(set_row.get("duration_seconds")),
+                        _int_or_none(set_row.get("rest_seconds")),
+                        set_row.get("provider_set_id"), weight_value, set_unit,
+                        _int_or_none(set_row.get("planned_rest_seconds")), completed,
+                        _as_datetime(set_row.get("completed_at")),
+                        set_row.get("is_new_rm1_record"),
+                        _float_or_none(set_row.get("rm1_weight_kg")),
+                        set_row.get("set_time_text"), heart_rate_data,
+                        set_row.get("flag"), Jsonb(set_row.get("comb_groups") or []),
+                        Jsonb(set_raw),
+                    ))
+                set_delete_rows.append((source, external_id, exercise_index, len(sets)))
+            exercise_delete_rows.append((source, external_id, len(exercises)))
+
+        async with self._connect() as conn:
             async with conn.transaction():
                 cursor = await conn.execute(
                     """INSERT INTO fitness_sync_runs (source, resource, status, details)
@@ -917,157 +1141,135 @@ class FitnessDatabase:
                 )
                 run_id = (await cursor.fetchone())[0]
 
-                for record in records:
-                    if not isinstance(record, dict):
-                        continue
-                    external_id = _source_id(record, ("id", "record_id", "workout_id", "session_id"))
-                    session_date = _as_date(record.get("session_date") or record.get("date") or record.get("dayStr"))
-                    if session_date is None:
-                        raise ValueError(f"练练训练记录 {external_id} 缺少有效日期")
-                    started_at = _as_datetime(record.get("started_at"))
-                    ended_at = _as_datetime(record.get("ended_at") or record.get("end_time"))
-                    source_raw = record.get("raw_data", record)
-                    metadata = record.get("source_metadata") or {}
+                session_sql = """INSERT INTO fitness_workout_sessions
+                    (source, external_id, category, sport_name, started_at, ended_at,
+                     duration_seconds, active_calories_kcal, total_calories_kcal,
+                     average_heart_rate_bpm, maximum_heart_rate_bpm, session_date,
+                     modality, record_type, training_type, status, calories_kcal,
+                     training_capacity, source_metadata, raw_data)
+                    VALUES (%s,%s,'strength_training',%s,%s,%s,%s,NULL,NULL,%s,NULL,
+                            %s,'strength',%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, external_id)
+                    DO UPDATE SET category=EXCLUDED.category,
+                      sport_name=EXCLUDED.sport_name, started_at=EXCLUDED.started_at,
+                      ended_at=EXCLUDED.ended_at, duration_seconds=EXCLUDED.duration_seconds,
+                      average_heart_rate_bpm=EXCLUDED.average_heart_rate_bpm,
+                      session_date=EXCLUDED.session_date, modality=EXCLUDED.modality,
+                      record_type=EXCLUDED.record_type, training_type=EXCLUDED.training_type,
+                      status=EXCLUDED.status, calories_kcal=EXCLUDED.calories_kcal,
+                      training_capacity=EXCLUDED.training_capacity,
+                      source_metadata=EXCLUDED.source_metadata,
+                      raw_data=EXCLUDED.raw_data, updated_at=now()
+                    WHERE (
+                      fitness_workout_sessions.category, fitness_workout_sessions.sport_name,
+                      fitness_workout_sessions.started_at, fitness_workout_sessions.ended_at,
+                      fitness_workout_sessions.duration_seconds,
+                      fitness_workout_sessions.average_heart_rate_bpm,
+                      fitness_workout_sessions.session_date, fitness_workout_sessions.modality,
+                      fitness_workout_sessions.record_type, fitness_workout_sessions.training_type,
+                      fitness_workout_sessions.status, fitness_workout_sessions.calories_kcal,
+                      fitness_workout_sessions.training_capacity,
+                      fitness_workout_sessions.source_metadata, fitness_workout_sessions.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.category, EXCLUDED.sport_name, EXCLUDED.started_at,
+                      EXCLUDED.ended_at, EXCLUDED.duration_seconds,
+                      EXCLUDED.average_heart_rate_bpm, EXCLUDED.session_date,
+                      EXCLUDED.modality, EXCLUDED.record_type, EXCLUDED.training_type,
+                      EXCLUDED.status, EXCLUDED.calories_kcal, EXCLUDED.training_capacity,
+                      EXCLUDED.source_metadata, EXCLUDED.raw_data
+                    )"""
+                exercise_sql = """INSERT INTO fitness_strength_exercises
+                    (source, external_id, exercise_index, exercise_name, body_part,
+                     action_id, weight_unit, capacity, planned_rest_seconds,
+                     weight_tag, comb_actions, raw_data)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, external_id, exercise_index)
+                    DO UPDATE SET exercise_name=EXCLUDED.exercise_name,
+                      body_part=EXCLUDED.body_part, action_id=EXCLUDED.action_id,
+                      weight_unit=EXCLUDED.weight_unit, capacity=EXCLUDED.capacity,
+                      planned_rest_seconds=EXCLUDED.planned_rest_seconds,
+                      weight_tag=EXCLUDED.weight_tag, comb_actions=EXCLUDED.comb_actions,
+                      raw_data=EXCLUDED.raw_data
+                    WHERE (
+                      fitness_strength_exercises.exercise_name,
+                      fitness_strength_exercises.body_part,
+                      fitness_strength_exercises.action_id,
+                      fitness_strength_exercises.weight_unit,
+                      fitness_strength_exercises.capacity,
+                      fitness_strength_exercises.planned_rest_seconds,
+                      fitness_strength_exercises.weight_tag,
+                      fitness_strength_exercises.comb_actions,
+                      fitness_strength_exercises.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.exercise_name, EXCLUDED.body_part, EXCLUDED.action_id,
+                      EXCLUDED.weight_unit, EXCLUDED.capacity, EXCLUDED.planned_rest_seconds,
+                      EXCLUDED.weight_tag, EXCLUDED.comb_actions, EXCLUDED.raw_data
+                    )"""
+                set_sql = """INSERT INTO fitness_strength_sets
+                    (source, external_id, exercise_index, set_index, weight_kg,
+                     reps, duration_seconds, rest_seconds, provider_set_id,
+                     weight_value, weight_unit, planned_rest_seconds, is_completed,
+                     completed_at, is_new_rm1_record, rm1_weight_kg, set_time_text,
+                     heart_rate_data, flag, comb_groups, raw_data)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
+                    ON CONFLICT (source, external_id, exercise_index, set_index)
+                    DO UPDATE SET weight_kg=EXCLUDED.weight_kg,
+                      reps=EXCLUDED.reps, duration_seconds=EXCLUDED.duration_seconds,
+                      rest_seconds=EXCLUDED.rest_seconds,
+                      provider_set_id=EXCLUDED.provider_set_id,
+                      weight_value=EXCLUDED.weight_value, weight_unit=EXCLUDED.weight_unit,
+                      planned_rest_seconds=EXCLUDED.planned_rest_seconds,
+                      is_completed=EXCLUDED.is_completed, completed_at=EXCLUDED.completed_at,
+                      is_new_rm1_record=EXCLUDED.is_new_rm1_record,
+                      rm1_weight_kg=EXCLUDED.rm1_weight_kg, set_time_text=EXCLUDED.set_time_text,
+                      heart_rate_data=EXCLUDED.heart_rate_data, flag=EXCLUDED.flag,
+                      comb_groups=EXCLUDED.comb_groups, raw_data=EXCLUDED.raw_data
+                    WHERE (
+                      fitness_strength_sets.weight_kg, fitness_strength_sets.reps,
+                      fitness_strength_sets.duration_seconds, fitness_strength_sets.rest_seconds,
+                      fitness_strength_sets.provider_set_id, fitness_strength_sets.weight_value,
+                      fitness_strength_sets.weight_unit, fitness_strength_sets.planned_rest_seconds,
+                      fitness_strength_sets.is_completed, fitness_strength_sets.completed_at,
+                      fitness_strength_sets.is_new_rm1_record, fitness_strength_sets.rm1_weight_kg,
+                      fitness_strength_sets.set_time_text, fitness_strength_sets.heart_rate_data,
+                      fitness_strength_sets.flag, fitness_strength_sets.comb_groups,
+                      fitness_strength_sets.raw_data
+                    ) IS DISTINCT FROM (
+                      EXCLUDED.weight_kg, EXCLUDED.reps, EXCLUDED.duration_seconds,
+                      EXCLUDED.rest_seconds, EXCLUDED.provider_set_id, EXCLUDED.weight_value,
+                      EXCLUDED.weight_unit, EXCLUDED.planned_rest_seconds, EXCLUDED.is_completed,
+                      EXCLUDED.completed_at, EXCLUDED.is_new_rm1_record, EXCLUDED.rm1_weight_kg,
+                      EXCLUDED.set_time_text, EXCLUDED.heart_rate_data, EXCLUDED.flag,
+                      EXCLUDED.comb_groups, EXCLUDED.raw_data
+                    )"""
 
-                    await conn.execute(
-                        """INSERT INTO fitness_workout_sessions
-                           (source, external_id, category, sport_name, started_at, ended_at,
-                            duration_seconds, active_calories_kcal, total_calories_kcal,
-                            average_heart_rate_bpm, maximum_heart_rate_bpm, session_date,
-                            modality, record_type, training_type, status, calories_kcal,
-                            training_capacity, source_metadata, raw_data)
-                           VALUES (%s,%s,'strength_training',%s,%s,%s,%s,NULL,NULL,%s,NULL,
-                                   %s,'strength',%s,%s,%s,%s,%s,%s,%s)
-                           ON CONFLICT (source, external_id)
-                           DO UPDATE SET category=EXCLUDED.category,
-                             sport_name=EXCLUDED.sport_name, started_at=EXCLUDED.started_at,
-                             ended_at=EXCLUDED.ended_at, duration_seconds=EXCLUDED.duration_seconds,
-                             average_heart_rate_bpm=EXCLUDED.average_heart_rate_bpm,
-                             session_date=EXCLUDED.session_date, modality=EXCLUDED.modality,
-                             record_type=EXCLUDED.record_type, training_type=EXCLUDED.training_type,
-                             status=EXCLUDED.status, calories_kcal=EXCLUDED.calories_kcal,
-                             training_capacity=EXCLUDED.training_capacity,
-                             source_metadata=EXCLUDED.source_metadata,
-                             raw_data=EXCLUDED.raw_data, updated_at=now()""",
-                        (
-                            source, external_id, str(record.get("name") or "力量训练"),
-                            started_at, ended_at, _int_or_none(record.get("duration_seconds")),
-                            _float_or_none(record.get("average_heart_rate_bpm")),
-                            session_date, record.get("record_type"), record.get("training_type"),
-                            record.get("status"), _float_or_none(record.get("calories_kcal")),
-                            _float_or_none(record.get("training_capacity")), Jsonb(metadata),
-                            Jsonb(source_raw),
-                        ),
-                    )
-                    sessions_written += 1
-
-                    exercises = record.get("exercises", [])
-                    if not isinstance(exercises, list):
-                        raise ValueError(f"练练训练记录 {external_id} 的 exercises 不是数组")
-                    for exercise_index, exercise in enumerate(exercises):
-                        if not isinstance(exercise, dict):
-                            continue
-                        exercise_name = str(exercise.get("name") or exercise.get("exercise_name") or "").strip()
-                        if not exercise_name:
-                            raise ValueError(f"练练训练记录 {external_id} 的第 {exercise_index + 1} 个动作缺少名称")
-                        exercise_raw = exercise.get("raw_data", exercise)
-                        weight_unit = exercise.get("weight_unit")
-                        await conn.execute(
-                            """INSERT INTO fitness_strength_exercises
-                               (source, external_id, exercise_index, exercise_name, body_part,
-                                action_id, weight_unit, capacity, planned_rest_seconds,
-                                weight_tag, comb_actions, raw_data)
-                               VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                               ON CONFLICT (source, external_id, exercise_index)
-                               DO UPDATE SET exercise_name=EXCLUDED.exercise_name,
-                                 body_part=EXCLUDED.body_part, action_id=EXCLUDED.action_id,
-                                 weight_unit=EXCLUDED.weight_unit, capacity=EXCLUDED.capacity,
-                                 planned_rest_seconds=EXCLUDED.planned_rest_seconds,
-                                 weight_tag=EXCLUDED.weight_tag, comb_actions=EXCLUDED.comb_actions,
-                                 raw_data=EXCLUDED.raw_data""",
-                            (
-                                source, external_id, exercise_index, exercise_name,
-                                exercise.get("body_part"), exercise.get("action_id"), weight_unit,
-                                _float_or_none(exercise.get("capacity")),
-                                _int_or_none(exercise.get("planned_rest_seconds")),
-                                Jsonb(exercise.get("weight_tag") or {}),
-                                Jsonb(exercise.get("comb_actions") or []), Jsonb(exercise_raw),
-                            ),
-                        )
-                        exercises_written += 1
-
-                        sets = exercise.get("sets", [])
-                        if not isinstance(sets, list):
-                            raise ValueError(f"动作 {exercise_name} 的 sets 不是数组")
-                        for set_index, set_row in enumerate(sets):
-                            if not isinstance(set_row, dict):
-                                continue
-                            set_raw = set_row.get("raw_data", set_row)
-                            set_unit = set_row.get("weight_unit") or weight_unit
-                            weight_value = _float_or_none(set_row.get("weight_value"))
-                            if weight_value is None:
-                                weight_value = _float_or_none(set_row.get("weight_kg"))
-                            weight_kg = (
-                                _float_or_none(set_row.get("weight_kg"))
-                                if str(set_unit or "").lower() == "kg" else None
-                            )
-                            completed = set_row.get("is_completed")
-                            if not isinstance(completed, bool):
-                                completed = None
-                            await conn.execute(
-                                """INSERT INTO fitness_strength_sets
-                                   (source, external_id, exercise_index, set_index, weight_kg,
-                                    reps, duration_seconds, rest_seconds, provider_set_id,
-                                    weight_value, weight_unit, planned_rest_seconds, is_completed,
-                                    completed_at, is_new_rm1_record, rm1_weight_kg, set_time_text,
-                                    heart_rate_data, flag, comb_groups, raw_data)
-                                   VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s)
-                                   ON CONFLICT (source, external_id, exercise_index, set_index)
-                                   DO UPDATE SET weight_kg=EXCLUDED.weight_kg,
-                                     reps=EXCLUDED.reps, duration_seconds=EXCLUDED.duration_seconds,
-                                     rest_seconds=EXCLUDED.rest_seconds,
-                                     provider_set_id=EXCLUDED.provider_set_id,
-                                     weight_value=EXCLUDED.weight_value,
-                                     weight_unit=EXCLUDED.weight_unit,
-                                     planned_rest_seconds=EXCLUDED.planned_rest_seconds,
-                                     is_completed=EXCLUDED.is_completed,
-                                     completed_at=EXCLUDED.completed_at,
-                                     is_new_rm1_record=EXCLUDED.is_new_rm1_record,
-                                     rm1_weight_kg=EXCLUDED.rm1_weight_kg,
-                                     set_time_text=EXCLUDED.set_time_text,
-                                     heart_rate_data=EXCLUDED.heart_rate_data,
-                                     flag=EXCLUDED.flag, comb_groups=EXCLUDED.comb_groups,
-                                     raw_data=EXCLUDED.raw_data""",
-                                (
-                                    source, external_id, exercise_index, set_index, weight_kg,
-                                    _int_or_none(set_row.get("reps")),
-                                    _int_or_none(set_row.get("duration_seconds")),
-                                    _int_or_none(set_row.get("rest_seconds")),
-                                    set_row.get("provider_set_id"), weight_value, set_unit,
-                                    _int_or_none(set_row.get("planned_rest_seconds")), completed,
-                                    _as_datetime(set_row.get("completed_at")),
-                                    set_row.get("is_new_rm1_record"),
-                                    _float_or_none(set_row.get("rm1_weight_kg")),
-                                    set_row.get("set_time_text"),
-                                    Jsonb(set_row.get("heart_rate_data")) if set_row.get("heart_rate_data") is not None else None,
-                                    set_row.get("flag"), Jsonb(set_row.get("comb_groups") or []),
-                                    Jsonb(set_raw),
-                                ),
-                            )
-                            sets_written += 1
-
-                        await conn.execute(
+                if session_rows:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(session_sql, session_rows)
+                        sessions_written = max(cursor.rowcount, 0)
+                if exercise_rows:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(exercise_sql, exercise_rows)
+                        exercises_written = max(cursor.rowcount, 0)
+                if set_rows:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(set_sql, set_rows)
+                        sets_written = max(cursor.rowcount, 0)
+                if set_delete_rows:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(
                             """DELETE FROM fitness_strength_sets
                                WHERE source=%s AND external_id=%s AND exercise_index=%s
                                  AND set_index >= %s""",
-                            (source, external_id, exercise_index, len(sets)),
+                            set_delete_rows,
                         )
-
-                    await conn.execute(
-                        """DELETE FROM fitness_strength_exercises
-                           WHERE source=%s AND external_id=%s AND exercise_index >= %s""",
-                        (source, external_id, len(exercises)),
-                    )
+                if exercise_delete_rows:
+                    async with conn.cursor() as cursor:
+                        await cursor.executemany(
+                            """DELETE FROM fitness_strength_exercises
+                               WHERE source=%s AND external_id=%s AND exercise_index >= %s""",
+                            exercise_delete_rows,
+                        )
 
                 latest_dates = [
                     _as_date(r.get("session_date") or r.get("date") or r.get("dayStr"))
@@ -1079,7 +1281,7 @@ class FitnessDatabase:
                     if latest_dates else None
                 )
                 await conn.execute(
-                    """UPDATE fitness_sync_runs SET status='success', finished_at=now(),
+                    """UPDATE fitness_sync_runs SET status='success', finished_at=clock_timestamp(),
                        records_seen=%s, records_written=%s, details=%s WHERE id=%s""",
                     (
                         len(records), sessions_written + exercises_written + sets_written,
@@ -1112,7 +1314,6 @@ class FitnessDatabase:
             "sets_upserted": sets_written,
         }
 
-
     @staticmethod
     def _metric_summary(rows: list[dict[str, Any]], key: str) -> dict[str, Any]:
         values = [row[key] for row in rows if row.get(key) is not None]
@@ -1139,7 +1340,7 @@ class FitnessDatabase:
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """WITH daily AS (
@@ -1261,7 +1462,7 @@ class FitnessDatabase:
         if not include_details:
             summary = await self.fat_loss_summary(days)
             since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-            async with await self._connect() as conn:
+            async with self._connect() as conn:
                 async with conn.cursor() as cur:
                     await cur.execute(
                         """SELECT
@@ -1328,7 +1529,7 @@ class FitnessDatabase:
             return summary
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT day, weight_kg, bmi, body_fat_rate, fat_mass_kg,
@@ -1428,7 +1629,7 @@ class FitnessDatabase:
             raise ValueError("days 必须在 1 到 3650 之间")
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT
@@ -1591,7 +1792,7 @@ class FitnessDatabase:
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT measured_date, measured_at, segmental_metrics
@@ -1645,7 +1846,7 @@ class FitnessDatabase:
     async def sync_status(self) -> dict[str, Any]:
         """Return last successful sync, latest attempt and recent run outcomes."""
         await self.initialize()
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT s.source, s.resource, s.last_success_at, s.latest_record_at,
@@ -1709,7 +1910,7 @@ class FitnessDatabase:
         await self.initialize()
         until_date = datetime.now(CN_TZ).date()
         since_date = until_date - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT count(*) AS records,
@@ -1828,7 +2029,7 @@ class FitnessDatabase:
             raise ValueError("exercise_name 不能为空且不能超过 120 个字符")
         await self.initialize()
         since_date = datetime.now(CN_TZ).date() - timedelta(days=days - 1)
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT session_date, exercise_name, set_count,
@@ -1913,7 +2114,7 @@ class FitnessDatabase:
             "anaerobic": "hrm_anaerobic_duration_seconds",
             "extreme": "hrm_extreme_duration_seconds",
         }
-        async with await self._connect() as conn:
+        async with self._connect() as conn:
             async with conn.cursor() as cur:
                 await cur.execute(
                     """SELECT COALESCE(session_date,

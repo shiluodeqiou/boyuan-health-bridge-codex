@@ -5,9 +5,8 @@ from datetime import datetime, timedelta
 from typing import Any
 
 from app.fitness_db import CN_TZ, FitnessDatabase
-from app.lianlian import get_training_records_page
 from app.health import HealthBridge
-
+from app.lianlian import get_training_records_page, training_records_http_session
 
 HEALTH_METRICS = (
     "heart_rate",
@@ -163,7 +162,7 @@ def normalize_lianlian_record(
     }
 
 
-async def fetch_all_lianlian_records(
+async def _fetch_all_lianlian_records(
     *,
     start_date: str,
     end_date: str,
@@ -227,6 +226,23 @@ async def fetch_all_lianlian_records(
         "record_count": len(records_by_id),
     }
     return list(records_by_id.values()), metadata
+
+
+async def fetch_all_lianlian_records(
+    *,
+    start_date: str,
+    end_date: str,
+    page_size: int = 50,
+    max_pages: int = 100,
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Read every page while reusing one HTTP connection pool."""
+    async with training_records_http_session():
+        return await _fetch_all_lianlian_records(
+            start_date=start_date,
+            end_date=end_date,
+            page_size=page_size,
+            max_pages=max_pages,
+        )
 
 
 async def sync_lianlian_to_database(
@@ -321,6 +337,7 @@ async def sync_xiaomi_to_database(
         "body_history_complete": body_composition.get("history_complete"),
         "body_history_pages": body_composition.get("pages_fetched"),
         "sport_record_count": sport_records.get("count", 0),
+        "sport_record_notes": sport_records.get("notes", []),
         "health_metrics_read": {
             key: len(value) if isinstance(value, list) else None
             for key, value in health_metrics.items()
@@ -334,6 +351,7 @@ async def sync_xiaomi_to_database(
     result["status"] = (
         "success"
         if body_composition.get("history_complete") is not False
+        and not sport_records.get("notes")
         and not result["health_metric_errors"]
         and not detail_errors
         else "partial"
@@ -348,26 +366,30 @@ async def sync_unified_fitness_data(
     days: int = 30,
     include_sport_details: bool = False,
 ) -> dict[str, Any]:
-    """Synchronize Xiaomi and KeepStrong into the same idempotent fitness database."""
+    """Synchronize Xiaomi and KeepStrong concurrently into the same database."""
     if not 1 <= days <= 30:
         raise ValueError("统一同步 days 必须在 1 到 30 之间")
 
+    xiaomi_result, lianlian_result = await asyncio.gather(
+        sync_xiaomi_to_database(
+            bridge, database, days=days, include_sport_details=include_sport_details
+        ),
+        sync_lianlian_to_database(database, days=days),
+        return_exceptions=True,
+    )
+
     results: dict[str, Any] = {}
     errors: dict[str, str] = {}
-
-    try:
-        results["xiaomi"] = await sync_xiaomi_to_database(
-            bridge, database, days=days, include_sport_details=include_sport_details
-        )
-        if results["xiaomi"].get("status") != "success":
-            errors["xiaomi"] = "小米数据部分指标或分页未完整读取"
-    except Exception as exc:
-        errors["xiaomi"] = f"{type(exc).__name__}: {str(exc)[:500]}"
-
-    try:
-        results["lianlian"] = await sync_lianlian_to_database(database, days=days)
-    except Exception as exc:
-        errors["lianlian"] = f"{type(exc).__name__}: {str(exc)[:500]}"
+    for source, result in (
+        ("xiaomi", xiaomi_result),
+        ("lianlian", lianlian_result),
+    ):
+        if isinstance(result, Exception):
+            errors[source] = f"{type(result).__name__}: {str(result)[:500]}"
+            continue
+        results[source] = result
+        if source == "xiaomi" and result.get("status") != "success":
+            errors[source] = "小米数据部分指标、分页或运动详情未完整读取"
 
     return {
         "database": "postgresql",

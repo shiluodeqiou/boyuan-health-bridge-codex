@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import httpx
 import pytest
 
+import app.lianlian as lianlian
 from app.lianlian import (
     _api_headers,
     _validate_training_query,
@@ -75,9 +77,6 @@ def test_api_headers_include_keepstrong_contract() -> None:
 
 @pytest.mark.asyncio
 async def test_training_records_page_returns_raw_payload_without_writing(monkeypatch) -> None:
-    import httpx
-    import app.lianlian as lianlian
-
     monkeypatch.setattr(lianlian, "_token", lambda: "test-token")
     calls = []
 
@@ -102,3 +101,39 @@ async def test_training_records_page_returns_raw_payload_without_writing(monkeyp
     assert calls[0][0] == "test-token"
     assert calls[0][1]["page"] == 1
     assert calls[0][1]["page_size"] == 50
+
+
+@pytest.mark.asyncio
+async def test_training_records_http_session_reuses_one_client(monkeypatch) -> None:
+    clients = []
+
+    class FakeClient:
+        def __init__(self, *args, **kwargs):
+            self.calls = 0
+            clients.append(self)
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *args):
+            return None
+
+        async def get(self, *args, **kwargs):
+            self.calls += 1
+            return httpx.Response(200)
+
+    monkeypatch.setattr(lianlian.httpx, "AsyncClient", FakeClient)
+
+    async with lianlian.training_records_http_session():
+        for page in (1, 2):
+            await lianlian._get_training_records_request(
+                "test-token",
+                start_date="20261101",
+                end_date="20261122",
+                page=page,
+                page_size=50,
+                skill_version="1.29.0",
+            )
+
+    assert len(clients) == 1
+    assert clients[0].calls == 2

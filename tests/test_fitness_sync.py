@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+
 import pytest
 
 import app.fitness_sync as fitness_sync
@@ -7,6 +9,7 @@ from app.fitness_sync import (
     _duration_seconds,
     fetch_all_lianlian_records,
     normalize_lianlian_record,
+    sync_unified_fitness_data,
     sync_xiaomi_to_database,
 )
 
@@ -204,3 +207,77 @@ async def test_xiaomi_sync_persists_sport_detail_errors_as_partial() -> None:
     }
     assert result["status"] == "partial"
     assert result["sport_detail_errors"] == {"123456": "RuntimeError"}
+
+
+@pytest.mark.asyncio
+async def test_unified_sync_runs_sources_concurrently(monkeypatch) -> None:
+    events: list[str] = []
+
+    async def fake_xiaomi(*args, **kwargs):
+        events.append("xiaomi:start")
+        await asyncio.sleep(0)
+        events.append("xiaomi:end")
+        return {"status": "success"}
+
+    async def fake_lianlian(*args, **kwargs):
+        events.append("lianlian:start")
+        await asyncio.sleep(0)
+        events.append("lianlian:end")
+        return {"status": "success"}
+
+    monkeypatch.setattr(fitness_sync, "sync_xiaomi_to_database", fake_xiaomi)
+    monkeypatch.setattr(fitness_sync, "sync_lianlian_to_database", fake_lianlian)
+
+    result = await sync_unified_fitness_data(object(), object(), days=30)
+
+    assert events == [
+        "xiaomi:start", "lianlian:start", "xiaomi:end", "lianlian:end"
+    ]
+    assert result["status"] == "success"
+    assert set(result["sources"]) == {"xiaomi", "lianlian"}
+
+
+@pytest.mark.asyncio
+async def test_xiaomi_sync_marks_sport_pagination_warnings_as_partial() -> None:
+    class FakeBridge:
+        async def body_composition_history(self, **kwargs):
+            return {"data": [], "history_complete": True, "pages_fetched": 1}
+
+        async def sport_records(self, **kwargs):
+            return {
+                "records": [],
+                "count": 0,
+                "notes": ["运动记录超过单次读取页数上限"],
+            }
+
+        async def history(self, relative, metric, query_date, days):
+            return {"data": []}
+
+    class FakeDatabase:
+        async def store_xiaomi(self, **kwargs):
+            return {"source": "xiaomi", "status": "success"}
+
+    result = await sync_xiaomi_to_database(
+        FakeBridge(), FakeDatabase(), days=1, include_sport_details=False
+    )
+
+    assert result["status"] == "partial"
+    assert result["sport_record_notes"] == ["运动记录超过单次读取页数上限"]
+
+
+@pytest.mark.asyncio
+async def test_unified_sync_reports_partial_when_one_source_fails(monkeypatch) -> None:
+    async def fail_xiaomi(*args, **kwargs):
+        raise RuntimeError("Xiaomi upstream timeout")
+
+    async def succeed_lianlian(*args, **kwargs):
+        return {"status": "success", "strength_sessions_upserted": 1}
+
+    monkeypatch.setattr(fitness_sync, "sync_xiaomi_to_database", fail_xiaomi)
+    monkeypatch.setattr(fitness_sync, "sync_lianlian_to_database", succeed_lianlian)
+
+    result = await sync_unified_fitness_data(object(), object(), days=30)
+
+    assert result["status"] == "partial"
+    assert result["errors"]["xiaomi"] == "RuntimeError: Xiaomi upstream timeout"
+    assert result["sources"]["lianlian"]["strength_sessions_upserted"] == 1
