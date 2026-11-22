@@ -4,7 +4,6 @@ import httpx
 import pytest
 
 import app.lianlian as lianlian
-
 from app.lianlian import (
     _api_headers,
     _validate_training_query,
