@@ -5,6 +5,7 @@ import contextlib
 import hmac
 import html
 from dataclasses import dataclass
+from typing import Literal
 
 from mcp.server.auth.settings import AuthSettings
 from mcp.server.mcpserver import MCPServer
@@ -172,7 +173,7 @@ async def sync_unified_fitness_database(
 
 @mcp.tool(
     title="查看统一健身分析仪表盘",
-    description="从 Neon 读取统一健身分析。默认返回轻量汇总，包含体重、体脂率、脂肪量、肌肉量的首末值和 7 日均值，以及按周训练次数、完成组数、有氧时长和热量。需要逐日趋势、动作进步和原始健康指标时设置 include_details=true。days 为 1 到 3650。",
+    description="从 Neon 读取综合健身仪表盘。默认返回身体成分、每周训练统计，以及日常步数、睡眠、静息心率和有氧/力量活动汇总；设置 include_details=true 才读取逐日时间轴、动作进步和健康指标明细。days 为 1 到 3650。",
     annotations=READ_ONLY,
 )
 async def get_fitness_dashboard(days: int = 90, include_details: bool = False) -> dict:
@@ -195,6 +196,73 @@ async def get_fat_loss_summary(days: int = 30) -> dict:
 )
 async def get_fitness_database_summary(days: int = 30) -> dict:
     return await fitness_database.summary(days)
+
+
+@mcp.tool(
+    title="查看分段身体成分趋势",
+    description="从 Neon 读取最近指定天数的体脂秤分段脂肪量或肌肉量趋势。metric 可选 fat_mass/muscle_mass；parts 可选 trunk、left_upper_limb、right_upper_limb、left_lower_limb、right_lower_limb，省略时返回全部。按每日最后一次测量聚合，不补零；smoothing_window 为最近有效测量次数。下肢整体数据不等于独立大腿数据。",
+    annotations=READ_ONLY,
+)
+async def get_segmental_body_trends(
+    days: int = 30,
+    metric: Literal["fat_mass", "muscle_mass"] = "fat_mass",
+    parts: list[Literal[
+        "trunk",
+        "left_upper_limb",
+        "right_upper_limb",
+        "left_lower_limb",
+        "right_lower_limb",
+    ]] | None = None,
+    smoothing_window: int = 7,
+) -> dict:
+    return await fitness_database.segmental_body_trends(
+        days=days,
+        metric=metric,
+        parts=parts,
+        smoothing_window=smoothing_window,
+    )
+
+
+@mcp.tool(
+    title="查看单个动作力量进步",
+    description="从 Neon 读取指定动作最近 1–3650 天的逐次训练进步，包括完成组数、未知组数、次数、kg 训练容量、最大重量和 Epley 估算 1RM。exercise_name 使用练练记录中的动作原名。",
+    annotations=READ_ONLY,
+)
+async def get_strength_progression(
+    exercise_name: str,
+    days: int = 90,
+) -> dict:
+    return await fitness_database.strength_progression(
+        exercise_name=exercise_name,
+        days=days,
+    )
+
+
+@mcp.tool(
+    title="查看有氧运动分析",
+    description="从 Neon 读取最近指定天数的小米有氧运动记录，按项目汇总次数、时长、热量和心率；逐秒采样存在时标记可进一步计算心率区间。",
+    annotations=READ_ONLY,
+)
+async def get_cardio_analysis(days: int = 30) -> dict:
+    return await fitness_database.cardio_analysis(days)
+
+
+@mcp.tool(
+    title="查看健身数据质量报告",
+    description="检查最近 1–3650 天的身体成分覆盖率、力量训练组完成状态、健康指标数量、逐秒运动采样和同步状态；不返回原始健康 JSON。",
+    annotations=READ_ONLY,
+)
+async def get_data_quality_report(days: int = 30) -> dict:
+    return await fitness_database.data_quality_report(days)
+
+
+@mcp.tool(
+    title="查看数据同步状态",
+    description="查看小米和练练健身各数据资源的最后成功同步、最近一次尝试、最新源记录时间及最近同步日志。",
+    annotations=READ_ONLY,
+)
+async def get_sync_status() -> dict:
+    return await fitness_database.sync_status()
 
 
 @mcp.tool(

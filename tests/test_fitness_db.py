@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import pytest
 
@@ -71,3 +71,104 @@ def test_metric_summary_uses_first_last_and_recent_seven_values() -> None:
     assert summary["last"] == 76.5
     assert summary["change"] == -3.5
     assert summary["seven_day_average"] == pytest.approx(78.0)
+
+
+
+def test_strength_analytics_only_counts_explicitly_completed_sets() -> None:
+    assert "st.is_completed IS DISTINCT FROM FALSE" not in SCHEMA_SQL
+    assert "sum(st.reps) FILTER (WHERE st.is_completed IS TRUE)" in SCHEMA_SQL
+    assert "AS unknown_set_count" in SCHEMA_SQL
+    assert "AS incomplete_set_count" in SCHEMA_SQL
+
+
+
+def test_segmental_trends_keep_missing_values_missing_and_smooth_observations() -> None:
+    rows = [
+        {
+            "measured_date": date(2026, 11, 1),
+            "segmental_metrics": {"trunk_fat_mass": "8.0"},
+        },
+        {
+            "measured_date": date(2026, 11, 3),
+            "segmental_metrics": {"trunk_fat_mass": 7.6},
+        },
+        {
+            "measured_date": date(2026, 11, 5),
+            "segmental_metrics": {},
+        },
+        {
+            "measured_date": date(2026, 11, 7),
+            "segmental_metrics": {"trunk_fat_mass": 7.2},
+        },
+    ]
+    trends = FitnessDatabase._build_segmental_trends(
+        rows,
+        metric="fat_mass",
+        parts=["trunk"],
+        smoothing_window=2,
+    )
+    trunk = trends["trunk"]
+    assert trunk["measurement_count"] == 3
+    assert trunk["first"]["value_kg"] == 8.0
+    assert trunk["last"]["value_kg"] == 7.2
+    assert trunk["change_kg"] == pytest.approx(-0.8)
+    assert trunk["series"][1]["moving_average_kg"] == pytest.approx(7.8)
+    assert trunk["series"][2]["moving_average_kg"] == pytest.approx(7.4)
+    assert all(point["date"] != "2026-11-05" for point in trunk["series"])
+
+
+def test_segmental_trends_support_lower_limb_not_thigh_alias() -> None:
+    rows = [
+        {
+            "measured_date": date(2026, 11, 1),
+            "segmental_metrics": {"left_lower_limb_fat_mass": 4.1},
+        }
+    ]
+    trends = FitnessDatabase._build_segmental_trends(
+        rows,
+        metric="fat_mass",
+        parts=["left_lower_limb"],
+        smoothing_window=1,
+    )
+    assert trends["left_lower_limb"]["last"]["value_kg"] == 4.1
+
+
+
+@pytest.mark.asyncio
+async def test_segmental_trends_reject_invalid_metric_before_database_access() -> None:
+    with pytest.raises(ValueError, match="metric"):
+        await FitnessDatabase().segmental_body_trends(metric="thigh")
+
+
+@pytest.mark.asyncio
+async def test_segmental_trends_reject_invalid_part_before_database_access() -> None:
+    with pytest.raises(ValueError, match="parts"):
+        await FitnessDatabase().segmental_body_trends(parts=["thigh"])
+
+
+@pytest.mark.asyncio
+async def test_segmental_trends_reject_invalid_smoothing_window_before_database_access() -> None:
+    with pytest.raises(ValueError, match="smoothing_window"):
+        await FitnessDatabase().segmental_body_trends(smoothing_window=0)
+
+
+
+def test_strength_views_exclude_planned_and_non_strength_sessions() -> None:
+    assert "s.status='completed' AND s.record_type='strength'" in SCHEMA_SQL
+    assert (
+        "FILTER (WHERE source='lianlian' AND status='completed' "
+        "AND record_type='strength')" in SCHEMA_SQL
+    )
+
+
+
+@pytest.mark.asyncio
+async def test_strength_progression_rejects_blank_exercise_name_before_database_access() -> None:
+    with pytest.raises(ValueError, match="exercise_name"):
+        await FitnessDatabase().strength_progression("   ")
+
+
+@pytest.mark.asyncio
+async def test_cardio_analysis_rejects_invalid_period_before_database_access() -> None:
+    with pytest.raises(ValueError, match="days"):
+        await FitnessDatabase().cardio_analysis(days=0)
