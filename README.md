@@ -77,6 +77,9 @@
 - \`sync_unified_fitness_database(days=30, include_sport_details=false)\`：同步小米身体成分、日常健康指标、运动摘要，以及练练官方训练记录。练练接口自动分页，全部页面确认 \`hasMore=false\` 后才写入；按来源 ID 幂等更新。
 - \`sync_personal_fitness_data(days=30, include_sport_details=false)\`：仅同步小米数据。
 - \`get_fitness_database_summary(days=30)\`：查看来源记录数和最近同步任务。
+- `get_sync_status()`：查看各数据源最后成功同步、最近尝试、最新源记录时间和最近同步日志。
+- `get_data_quality_report(days=30)`：查看身体成分字段覆盖率、力量训练组完成状态、健康指标覆盖和逐秒运动采样情况。
+- `get_segmental_body_trends(days=30, metric="fat_mass", parts=null, smoothing_window=7)`：查看躯干、左右上肢和左右下肢脂肪量/肌肉量趋势；按每日最后一次测量聚合，缺失值不补零，移动平均按最近有效测量次数计算。下肢数据不是独立大腿数据。
 - \`get_fitness_dashboard(days=90, include_details=false)\`：默认读取轻量汇总，包含体重、体脂率、脂肪量、肌肉量的首末值和 7 日均值，以及按周训练次数、完成组数、有氧时长和热量；设置 \`include_details=true\` 才读取每日时间轴、动作进步和健康指标明细。
 - \`get_fat_loss_summary(days=30)\`：专门用于最近减脂效果评价的紧凑接口，所有指标直接由 Neon 服务端聚合，不请求小米或练练健身上游接口。
 - \`get_lianlian_skill_manifest()\`：安全读取练练当前技能说明。
