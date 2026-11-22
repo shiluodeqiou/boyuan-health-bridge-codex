@@ -707,6 +707,10 @@ class FitnessDatabase:
         )
         run_id: int | None = None
         body_written = workout_written = metric_written = sample_written = 0
+        records_seen = (
+            len(body_rows) + len(workout_rows)
+            + sum(len(rows) for rows in health_metrics.values() if isinstance(rows, list))
+        )
         now = datetime.now(timezone.utc)
 
         async with self._connect() as conn:
@@ -982,14 +986,14 @@ class FitnessDatabase:
                          latest_record_at=COALESCE(EXCLUDED.latest_record_at,
                                                     fitness_sync_state.latest_record_at),
                          records_seen=EXCLUDED.records_seen""",
-                    (source, resource, now if sync_status == "success" else None, latest_record_at, len(body_rows) + len(workout_rows)),
+                    (source, resource, now if sync_status == "success" else None, latest_record_at, records_seen),
                 )
                 await conn.execute(
                     """UPDATE fitness_sync_runs SET status=%s, finished_at=clock_timestamp(),
                        records_seen=%s, records_written=%s, details=%s WHERE id=%s""",
                     (
                         sync_status,
-                        len(body_rows) + len(workout_rows) + metric_written,
+                        records_seen,
                         body_written + workout_written + metric_written + sample_written,
                         Jsonb({
                             "days": days,
