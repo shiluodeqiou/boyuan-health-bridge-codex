@@ -315,6 +315,7 @@ async def sync_xiaomi_to_database(
         sport_records=sport_records,
         health_metrics=health_metrics,
         sport_details=details,
+        sport_detail_errors=detail_errors,
     )
     result.update({
         "body_history_complete": body_composition.get("history_complete"),
