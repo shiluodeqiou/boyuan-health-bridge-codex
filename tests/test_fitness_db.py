@@ -159,3 +159,16 @@ def test_strength_views_exclude_planned_and_non_strength_sessions() -> None:
         "FILTER (WHERE source='lianlian' AND status='completed' "
         "AND record_type='strength')" in SCHEMA_SQL
     )
+
+
+
+@pytest.mark.asyncio
+async def test_strength_progression_rejects_blank_exercise_name_before_database_access() -> None:
+    with pytest.raises(ValueError, match="exercise_name"):
+        await FitnessDatabase().strength_progression("   ")
+
+
+@pytest.mark.asyncio
+async def test_cardio_analysis_rejects_invalid_period_before_database_access() -> None:
+    with pytest.raises(ValueError, match="days"):
+        await FitnessDatabase().cardio_analysis(days=0)
