@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import inspect
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 import pytest
 
@@ -20,7 +20,7 @@ from app.fitness_db import (
 
 def test_parses_unix_seconds_and_timezone_aware_iso() -> None:
     assert _as_datetime(1_795_221_108) == datetime.fromtimestamp(
-        1_795_221_108, timezone.utc
+        1_795_221_108, UTC
     )
     parsed = _as_datetime("2026-11-21T08:31:48+08:00")
     assert parsed is not None
