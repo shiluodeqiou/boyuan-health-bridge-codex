@@ -235,3 +235,31 @@ async def test_unified_sync_runs_sources_concurrently(monkeypatch) -> None:
     ]
     assert result["status"] == "success"
     assert set(result["sources"]) == {"xiaomi", "lianlian"}
+
+
+@pytest.mark.asyncio
+async def test_xiaomi_sync_marks_sport_pagination_warnings_as_partial() -> None:
+    class FakeBridge:
+        async def body_composition_history(self, **kwargs):
+            return {"data": [], "history_complete": True, "pages_fetched": 1}
+
+        async def sport_records(self, **kwargs):
+            return {
+                "records": [],
+                "count": 0,
+                "notes": ["运动记录超过单次读取页数上限"],
+            }
+
+        async def history(self, relative, metric, query_date, days):
+            return {"data": []}
+
+    class FakeDatabase:
+        async def store_xiaomi(self, **kwargs):
+            return {"source": "xiaomi", "status": "success"}
+
+    result = await sync_xiaomi_to_database(
+        FakeBridge(), FakeDatabase(), days=1, include_sport_details=False
+    )
+
+    assert result["status"] == "partial"
+    assert result["sport_record_notes"] == ["运动记录超过单次读取页数上限"]
