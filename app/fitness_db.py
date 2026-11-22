@@ -337,11 +337,13 @@ strength_rollup AS (
   SELECT COALESCE(s.session_date, (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) AS day,
     count(*) AS strength_set_count,
     count(*) FILTER (WHERE st.is_completed IS TRUE) AS completed_set_count,
-    sum(st.reps) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS strength_reps,
+    count(*) FILTER (WHERE st.is_completed IS NULL) AS unknown_set_count,
+    count(*) FILTER (WHERE st.is_completed IS FALSE) AS incomplete_set_count,
+    sum(st.reps) FILTER (WHERE st.is_completed IS TRUE) AS strength_reps,
     sum(st.weight_kg * st.reps)
       FILTER (WHERE st.weight_kg IS NOT NULL AND st.reps IS NOT NULL
-              AND st.is_completed IS DISTINCT FROM FALSE) AS strength_volume_kg,
-    max(st.weight_kg) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS max_lift_kg
+              AND st.is_completed IS TRUE) AS strength_volume_kg,
+    max(st.weight_kg) FILTER (WHERE st.is_completed IS TRUE) AS max_lift_kg
   FROM fitness_workout_sessions s
   JOIN fitness_strength_exercises e
     ON e.source=s.source AND e.external_id=s.external_id
@@ -405,7 +407,9 @@ SELECT d.day,
   hv.sleep_light_minutes, hv.sleep_awake_minutes,
   hv.average_daily_heart_rate_bpm, hv.resting_heart_rate_bpm,
   hv.average_spo2_percent, hv.stand_count, hv.intensity_minutes,
-  COALESCE(h.health_metrics,'{}'::jsonb) AS health_metrics
+  COALESCE(h.health_metrics,'{}'::jsonb) AS health_metrics,
+  COALESCE(sr.unknown_set_count,0) AS unknown_set_count,
+  COALESCE(sr.incomplete_set_count,0) AS incomplete_set_count
 FROM all_days d
 LEFT JOIN latest_body b ON b.measured_date=d.day
 LEFT JOIN workout_rollup w ON w.day=d.day
@@ -419,14 +423,16 @@ SELECT
   e.exercise_name,
   count(*) AS set_count,
   count(*) FILTER (WHERE st.is_completed IS TRUE) AS completed_set_count,
-  sum(st.reps) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS total_reps,
+  sum(st.reps) FILTER (WHERE st.is_completed IS TRUE) AS total_reps,
   sum(st.weight_kg * st.reps)
     FILTER (WHERE st.weight_kg IS NOT NULL AND st.reps IS NOT NULL
-            AND st.is_completed IS DISTINCT FROM FALSE) AS volume_kg,
-  max(st.weight_kg) FILTER (WHERE st.is_completed IS DISTINCT FROM FALSE) AS max_weight_kg,
+            AND st.is_completed IS TRUE) AS volume_kg,
+  max(st.weight_kg) FILTER (WHERE st.is_completed IS TRUE) AS max_weight_kg,
   max(st.weight_kg * (1 + st.reps / 30.0))
     FILTER (WHERE st.weight_kg > 0 AND st.reps > 0
-            AND st.is_completed IS DISTINCT FROM FALSE) AS best_estimated_1rm_kg
+            AND st.is_completed IS TRUE) AS best_estimated_1rm_kg,
+  count(*) FILTER (WHERE st.is_completed IS NULL) AS unknown_set_count,
+  count(*) FILTER (WHERE st.is_completed IS FALSE) AS incomplete_set_count
 FROM fitness_workout_sessions s
 JOIN fitness_strength_exercises e
   ON e.source=s.source AND e.external_id=s.external_id
@@ -573,6 +579,7 @@ class FitnessDatabase:
         sport_records: dict[str, Any],
         health_metrics: dict[str, list[dict[str, Any]]],
         sport_details: dict[str, dict[str, Any]] | None = None,
+        sport_detail_errors: dict[str, str] | None = None,
     ) -> dict[str, Any]:
         await self.initialize()
         source = "xiaomi"
@@ -580,10 +587,12 @@ class FitnessDatabase:
         body_rows = body_composition.get("data", [])
         workout_rows = sport_records.get("records", [])
         details = sport_details or {}
+        detail_errors = sport_detail_errors or {}
         sync_status = (
             "partial"
             if body_composition.get("history_complete") is False
             or any(not isinstance(rows, list) for rows in health_metrics.values())
+            or bool(detail_errors)
             else "success"
         )
         run_id: int | None = None
@@ -758,8 +767,11 @@ class FitnessDatabase:
                        (source, resource, last_success_at, latest_record_at, records_seen)
                        VALUES (%s,%s,%s,%s,%s)
                        ON CONFLICT (source, resource)
-                       DO UPDATE SET last_success_at=EXCLUDED.last_success_at,
-                         latest_record_at=EXCLUDED.latest_record_at,
+                       DO UPDATE SET
+                         last_success_at=COALESCE(EXCLUDED.last_success_at,
+                                                   fitness_sync_state.last_success_at),
+                         latest_record_at=COALESCE(EXCLUDED.latest_record_at,
+                                                    fitness_sync_state.latest_record_at),
                          records_seen=EXCLUDED.records_seen""",
                     (source, resource, now if sync_status == "success" else None, latest_record_at, len(body_rows) + len(workout_rows)),
                 )
@@ -780,6 +792,7 @@ class FitnessDatabase:
                                 key for key, rows in health_metrics.items()
                                 if not isinstance(rows, list)
                             ],
+                            "sport_detail_errors": detail_errors,
                         }),
                         run_id,
                     ),
@@ -795,6 +808,8 @@ class FitnessDatabase:
             "health_metric_rows_upserted": metric_written,
             "workout_samples_upserted": sample_written,
             "sport_details_included": bool(details),
+            "sport_detail_errors": detail_errors,
+            "status": sync_status,
         }
 
     async def store_lianlian(
@@ -1095,7 +1110,11 @@ class FitnessDatabase:
                            SELECT date_trunc('week', s.day::timestamp)::date AS week_start,
                                   count(*) AS sets_recorded,
                                   count(*) FILTER (WHERE st.is_completed IS TRUE)
-                                      AS completed_sets
+                                      AS completed_sets,
+                                  count(*) FILTER (WHERE st.is_completed IS NULL)
+                                      AS unknown_sets,
+                                  count(*) FILTER (WHERE st.is_completed IS FALSE)
+                                      AS incomplete_sets
                            FROM sessions s
                            JOIN fitness_strength_exercises e
                              ON e.source=s.source AND e.external_id=s.external_id
@@ -1108,7 +1127,9 @@ class FitnessDatabase:
                        SELECT ws.week_start, ws.strength_sessions, ws.cardio_sessions,
                               ws.cardio_duration_minutes, ws.cardio_calories_kcal,
                               COALESCE(wt.sets_recorded, 0) AS sets_recorded,
-                              COALESCE(wt.completed_sets, 0) AS completed_sets
+                              COALESCE(wt.completed_sets, 0) AS completed_sets,
+                              COALESCE(wt.unknown_sets, 0) AS unknown_sets,
+                              COALESCE(wt.incomplete_sets, 0) AS incomplete_sets
                        FROM weekly_sessions ws
                        LEFT JOIN weekly_sets wt USING (week_start)
                        ORDER BY ws.week_start""",
@@ -1172,7 +1193,7 @@ class FitnessDatabase:
                               sleep_light_minutes, sleep_awake_minutes,
                               average_daily_heart_rate_bpm, resting_heart_rate_bpm,
                               average_spo2_percent, stand_count, intensity_minutes,
-                              health_metrics
+                              health_metrics, unknown_set_count, incomplete_set_count
                        FROM fitness_daily_overview
                        WHERE day >= %s ORDER BY day DESC LIMIT 500""",
                     (since_date,),
@@ -1188,7 +1209,8 @@ class FitnessDatabase:
                 ]
                 await cur.execute(
                     """SELECT session_date, exercise_name, set_count, completed_set_count,
-                              total_reps, volume_kg, max_weight_kg, best_estimated_1rm_kg
+                              total_reps, volume_kg, max_weight_kg, best_estimated_1rm_kg,
+                              unknown_set_count, incomplete_set_count
                        FROM fitness_strength_progression
                        WHERE session_date >= %s
                        ORDER BY session_date DESC, exercise_name LIMIT 1000""",
@@ -1206,19 +1228,30 @@ class FitnessDatabase:
                 await cur.execute(
                     """SELECT e.exercise_name,
                               count(*) AS set_count,
-                              max(st.weight_kg) AS best_weight_kg,
+                              count(*) FILTER (WHERE st.is_completed IS TRUE) AS completed_set_count,
+                              count(*) FILTER (WHERE st.is_completed IS NULL) AS unknown_set_count,
+                              count(*) FILTER (WHERE st.is_completed IS FALSE) AS incomplete_set_count,
+                              max(st.weight_kg) FILTER (WHERE st.is_completed IS TRUE) AS best_weight_kg,
                               max(st.weight_kg * (1 + st.reps / 30.0))
-                                FILTER (WHERE st.weight_kg > 0 AND st.reps > 0) AS best_estimated_1rm_kg,
+                                FILTER (WHERE st.is_completed IS TRUE
+                                        AND st.weight_kg > 0 AND st.reps > 0) AS best_estimated_1rm_kg,
                               sum(st.weight_kg * st.reps)
-                                FILTER (WHERE st.weight_kg IS NOT NULL AND st.reps IS NOT NULL) AS total_volume_kg
+                                FILTER (WHERE st.is_completed IS TRUE
+                                        AND st.weight_kg IS NOT NULL AND st.reps IS NOT NULL) AS total_volume_kg
                        FROM fitness_strength_exercises e
                        JOIN fitness_strength_sets st
                          ON st.source=e.source AND st.external_id=e.external_id
                         AND st.exercise_index=e.exercise_index
+                       JOIN fitness_workout_sessions s
+                         ON s.source=e.source AND s.external_id=e.external_id
                        WHERE e.source='lianlian'
+                         AND COALESCE(s.session_date,
+                                      (s.started_at AT TIME ZONE 'Asia/Shanghai')::date) >= %s
                        GROUP BY e.exercise_name
-                       ORDER BY best_estimated_1rm_kg DESC NULLS LAST, set_count DESC
-                       LIMIT 20"""
+                       ORDER BY best_estimated_1rm_kg DESC NULLS LAST,
+                                completed_set_count DESC
+                       LIMIT 20""",
+                    (since_date,),
                 )
                 top_rows = await cur.fetchall()
                 top_columns = [column.name for column in cur.description]
