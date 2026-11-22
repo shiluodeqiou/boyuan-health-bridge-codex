@@ -711,7 +711,7 @@ class FitnessDatabase:
             len(body_rows) + len(workout_rows)
             + sum(len(rows) for rows in health_metrics.values() if isinstance(rows, list))
         )
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
 
         body_params: list[tuple[Any, ...]] = []
         for row in body_rows:
@@ -1039,7 +1039,7 @@ class FitnessDatabase:
         await self.initialize()
         source = "lianlian"
         sessions_written = exercises_written = sets_written = 0
-        now = datetime.now(timezone.utc)
+        now = datetime.now(UTC)
         session_rows: list[tuple[Any, ...]] = []
         exercise_rows: list[tuple[Any, ...]] = []
         set_rows: list[tuple[Any, ...]] = []
